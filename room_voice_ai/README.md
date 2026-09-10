@@ -8,7 +8,7 @@
 [![Type Checker](https://img.shields.io/badge/Pyrefly-0_Errors-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> **RooM Voice AI** là kiến trúc trợ lý giọng nói thông minh cho phòng họp thời gian thực, hoạt động hoàn toàn **Offline (On-Premise / Edge Computing)**, kết hợp tối ưu giữa **CPU AVX2 đa luồng** và **GPU VRAM giới hạn (<= 4GB VRAM như RTX 3050/3060)**. Hệ thống bao gồm **7 module chuyên biệt** hoạt động bất đồng bộ phi chặn (Non-blocking Asynchronous Pub/Sub Pipeline) qua In-Memory EventBus.
+> **RooM Voice AI** là kiến trúc trợ lý giọng nói thông minh cho phòng họp thời gian thực, hoạt động hoàn toàn **Offline (On-Premise / Edge Computing)**, kết hợp tối ưu giữa **CPU AVX2 đa luồng** và **GPU VRAM giới hạn ($\le 4\text{ GB}$ VRAM như RTX 3050/3060)**. Hệ thống bao gồm **7 module chuyên biệt** hoạt động bất đồng bộ phi chặn (Non-blocking Asynchronous Pub/Sub Pipeline) qua In-Memory EventBus.
 
 ---
 
@@ -29,30 +29,52 @@
 Hệ thống được thiết kế theo mô hình luồng dữ liệu thời gian thực (Real-time Streaming Dataflow) với 2 luồng phản hồi đồng thời: **Path 1 (Text Stream Markdown)** và **Path 2 (Voice Stream 24kHz PCM)**:
 
 ```mermaid
+%%{init: {'theme': 'dark', 'themeVariables': { 'darkMode': true, 'background': 'transparent', 'mainBkg': '#1e293b', 'nodeBorder': '#38bdf8', 'lineColor': '#60a5fa', 'textColor': '#f8fafc' }}}%%
 flowchart TD
-    subgraph S1["Tầng Thu nhận Âm thanh & Tiền xử lý"]
-        MIC["Microphone (16kHz PCM Stream)"] --> M1["MODULE 1: Audio Preprocessor<br/>• HPF 80Hz + WebRTC AEC<br/>• DeepFilterNet3 STFT Denoise<br/>• Silero VAD v5 + Ramirez 2005 Hangover (256ms)<br/>• Peak AGC (-3 dBFS)"]
-    end
+    MIC(["🎙️ Microphone Input<br/>(16kHz 16-bit PCM Stream)"])
+    
+    M1["<b>MODULE 1 · Audio Preprocessor (CPU)</b><br/>• Butterworth HPF 80Hz + WebRTC AEC<br/>• DeepFilterNet3 STFT Noise Suppressor<br/>• Silero VAD v5 + Ramirez 256ms Hangover<br/>• Peak AGC (-3 dBFS)"]
 
-    M1 -->|"AudioChunkPayload (is_speech=True)"| BUS["In-Memory Async EventBus (asyncio.Queue)"]
+    BUS{{"⚡ In-Memory Async EventBus (asyncio.Queue) ⚡"}}
 
-    subgraph S2["Tầng Nhận diện & Hiểu Ngôn ngữ"]
-        BUS -->|"RAW_AUDIO_STREAM"| M2["MODULE 2: Wake-Word Detector<br/>• Sliding Audio Ring Buffer<br/>• openWakeWord / Hey Siri INT8 ONNX<br/>• Moving Average Smoothing (w=3)<br/>• Dual-Threshold Hysteresis + 1.5s Cooldown"]
-        M2 -->|"WAKE_WORD_TRIGGERED"| M3["MODULE 3: Streaming Vietnamese ASR<br/>• PhoWhisper-fast (CTranslate2)<br/>• Context-Overlap Ring Buffer (200ms)<br/>• LCP Local Agreement Committing<br/>• PyVi Punctuation & Capitalization"]
-        M3 -->|"FINAL_TRANSCRIPT"| M4["MODULE 4: Meeting NLU & Intent<br/>• PyVi Word Segmentation<br/>• PhoBERT-Joint Multi-Task ONNX INT8<br/>• 6 Core Meeting Intents + 5 Slot Labels<br/>• Entity Canonicalization (ISO-8601)"]
-    end
+    M2["<b>MODULE 2 · Wake-Word (CPU)</b><br/>• Audio Ring Buffer (1.0s)<br/>• openWakeWord ONNX INT8<br/>• Moving Average (w=3)<br/>• Hysteresis 0.7/0.4 + 1.5s Cooldown"]
 
-    subgraph S3["Tầng Quản lý Ngữ cảnh & Bộ nhớ Hội thoại"]
-        M4 -->|"NLU_INTENT_SLOTS"| M5["MODULE 5: Meeting Context Manager<br/>• Short-Term Working Memory FIFO (12 turns)<br/>• Memory Pressure (>70%) Rolling Summarizer<br/>• Long-Term Archival Decision Store (SQLite)<br/>• BGE-M3 Topic Shift Detection<br/>• Token Budget Knapsack Pruner (3000 tok)"]
-    end
+    M3["<b>MODULE 3 · Streaming ASR (GPU/CPU)</b><br/>• PhoWhisper-Fast (CTranslate2)<br/>• Context Buffer (3.0s / 200ms Overlap)<br/>• LCP Local Agreement Committing<br/>• Punctuation & Code-Switching"]
 
-    subgraph S4["Tầng Suy luận Cốt lõi & RAG"]
-        M5 -->|"COMPILED_CONTEXT"| M6["MODULE 6: AI Brain & Hybrid RAG<br/>• Qwen2.5-3B-Instruct (GGUF Q4_K_M)<br/>• Dense Vector FAISS + Sparse Okapi BM25<br/>• Reciprocal Rank Fusion (RRF, k=60)<br/>• Dynamic ChatML 4-Block Prompt<br/>• Constrained JSON Grammar Decoding"]
-    end
+    M4["<b>MODULE 4 · Meeting NLU (CPU)</b><br/>• PyVi Word Segmentation<br/>• PhoBERT-Joint Multi-Task INT8<br/>• 6 Core Intents + 11 BIO Slot Tags<br/>• ISO-8601 UTC Canonicalization"]
 
-    subgraph S5["Tầng Đa phương thức Đa kênh"]
-        M6 -->|"BRAIN_RESPONSE_STREAM"| M7["MODULE 7: Multimodal Output<br/>• Path 1: Markdown Chat Stream + Jira/Action Table<br/>• Path 2: Punctuation Clause Splitter + Edge/Kokoro TTS (24kHz)<br/>• Async WebSocket Hub (ws://localhost:8765)"]
-    end
+    M5["<b>MODULE 5 · Context Manager (CPU)</b><br/>• Short-Term FIFO (12 turns)<br/>• Pressure Eviction (>70%) Rolling Summary<br/>• Archival Decision Store (SQLite)<br/>• BGE-M3 Topic Shift Detection<br/>• Knapsack Token Pruning (3000 tok)"]
+
+    M6["<b>MODULE 6 · AI Brain & Hybrid RAG (GPU/CPU)</b><br/>• Qwen2.5-3B-Instruct (GGUF Q4_K_M)<br/>• Dense BGE-M3 (FAISS) + Sparse Okapi BM25<br/>• Reciprocal Rank Fusion (RRF, k=60)<br/>• Constrained JSON Grammar Engine"]
+
+    M7["<b>MODULE 7 · Multimodal Output (CPU)</b><br/>• Path 1: Chat Markdown Formatter + Jira Table<br/>• Path 2: Punctuation Splitter + Neural TTS (24kHz)<br/>• Async WebSocket Hub (ws://0.0.0.0:8765)"]
+
+    MIC --> M1
+    M1 -->|AudioChunkPayload| BUS
+    BUS -->|RAW_AUDIO_STREAM| M2
+    M2 -->|WAKE_WORD_TRIGGERED| M3
+    M3 -->|FINAL_TRANSCRIPT| M4
+    M4 -->|NLU_INTENT_SLOTS| M5
+    M5 -->|COMPILED_CONTEXT| M6
+    M6 -->|BRAIN_RESPONSE_STREAM| M7
+
+    classDef audio fill:#0c4a6e,stroke:#38bdf8,stroke-width:2px,color:#f0f9ff;
+    classDef bus fill:#312e81,stroke:#818cf8,stroke-width:2px,color:#e0e7ff;
+    classDef speech fill:#4c1d95,stroke:#c084fc,stroke-width:2px,color:#faf5ff;
+    classDef asr fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#f0fdf4;
+    classDef nlu fill:#064e3b,stroke:#34d399,stroke-width:2px,color:#ecfdf5;
+    classDef ctx fill:#713f12,stroke:#facc15,stroke-width:2px,color:#fefce8;
+    classDef brain fill:#7c2d12,stroke:#fb923c,stroke-width:2px,color:#fff7ed;
+    classDef out fill:#881337,stroke:#fb7185,stroke-width:2px,color:#fff1f2;
+
+    class MIC,M1 audio;
+    class BUS bus;
+    class M2 speech;
+    class M3 asr;
+    class M4 nlu;
+    class M5 ctx;
+    class M6 brain;
+    class M7 out;
 ```
 
 ---
@@ -85,7 +107,7 @@ flowchart TD
 - **Mô hình:** PhoWhisper-Fast tối ưu hóa qua CTranslate2 / Faster-Whisper.
 - **Vùng đệm ngữ cảnh cuộn:** Buffer 3.0s với bước trượt 0.5s, overlap 200ms bảo tồn phụ âm đầu.
 - **Thuật toán cam kết văn bản (Local Agreement Committing):** Tìm kiếm tiền tố chung dài nhất (Longest Common Prefix - LCP) giữa 2 lần giải mã liên tiếp:
-  $$\text{LCP}(T_k, T_{k+1}) \implies \text{Commit to Confirmed Prefix}$$
+  $$\operatorname{LCP}(T_k, T_{k+1}) \implies \text{Commit to Confirmed Prefix}$$
 - **Hậu xử lý ngôn ngữ:** Chuẩn hóa tiếng lóng/thuật ngữ kỹ thuật (code-switching: `microservices`, `gRPC`, `jira`, `kpi`) và khôi phục dấu câu/viết hoa tiếng Việt.
 
 ### Module 4: Meeting NLU & Joint Multi-Task Intent/Slot (CPU)
@@ -106,7 +128,7 @@ flowchart TD
 - **Tóm tắt cuốn chiếu khi quá tải:** Khi số token vượt quá $70\%$ ngân sách ($>2100/3000\text{ tokens}$), kích hoạt nén các lượt cũ thành đoạn tóm tắt rolling summary.
 - **Bộ nhớ dài hạn (Archival Memory):** Lưu trữ có cấu trúc các Action Items, Quyết định kỹ thuật, và KPI vào SQLite + BGE-M3 Vector Store.
 - **Phát hiện chuyển chủ đề (Topic Shift Detection):** Tính toán Cosine Distance giữa embedding lượt thoại hiện tại và trọng tâm chủ đề:
-  $$\text{Distance} = 1 - \frac{\vec{u} \cdot \vec{v}}{\|\vec{u}\|_2 \|\vec{v}\|_2} > 0.45 \implies \text{Topic Shift Event}$$
+  $$\text{Cosine-Distance} = 1 - \frac{\vec{u} \cdot \vec{v}}{\|\vec{u}\|_2 \|\vec{v}\|_2} > 0.45 \implies \text{Topic Shift Event}$$
 - **Xếp gói ngân sách ngữ cảnh (Knapsack Pruning):** Lắp ghép 4 khối prompt (Hệ thống, Tóm tắt cũ, Lượt thoại mới, Tài liệu RAG) đảm bảo không vượt quá $3,000\text{ tokens}$.
 
 ### Module 6: Core AI Brain & Dense-Sparse Hybrid RAG (GPU/CPU)
@@ -115,7 +137,7 @@ flowchart TD
   - Dense Vector: BGE-M3 + FAISS L2/Cosine Search.
   - Sparse Lexical: Okapi BM25 ($k_1=1.5, b=0.75$).
   - Thuật toán dung hợp xếp hạng (Reciprocal Rank Fusion - RRF, $k=60$):
-    $$\text{RRF\_Score}(d) = \sum_{m \in \{\text{dense}, \text{sparse}\}} \frac{1}{60 + r_m(d)}$$
+    $$\operatorname{Score}_{\mathrm{RRF}}(d) = \sum_{m \in \{\mathrm{dense}, \mathrm{sparse}\}} \frac{1}{60 + r_m(d)}$$
 - **Ràng buộc định dạng (Constrained JSON Grammar Decoding):** Ép buộc LLM sinh đúng $100\%$ JSON Schema định sẵn cho các Function Calls (`create_jira_task`, `summarize_meeting`).
 
 ### Module 7: Multimodal Output Generation & Real-Time Delivery (CPU)
@@ -139,7 +161,7 @@ flowchart TD
 - **Kiến trúc mạng:** `vinai/phobert-base-v2` làm Backbone Encoder + 2 Linear Classification Heads độc lập:
   - Intent Head: Softmax 6 lớp ý định họp.
   - Slot Head: Linear CRF/Softmax 11 nhãn BIO (`B-TASK`, `I-TASK`, `B-PERSON`, `I-PERSON`, `B-TIME`, `I-TIME`, `B-PRIORITY`, `I-PRIORITY`, `B-PROJECT`, `I-PROJECT`, `O`).
-- **Hàm mất mát:** $\mathcal{L} = 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{intent}}, y_{\text{intent}}) + 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{slot}}, y_{\text{slot}})$.
+- **Hàm mất mát:** $\mathcal{L}_{\text{joint}} = 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{intent}}, y_{\text{intent}}) + 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{slot}}, y_{\text{slot}})$.
 - **Tối ưu hóa:** AdamW, learning rate $3 \times 10^{-5}$, linear warmup 10%, weight decay 0.01.
 - **Xuất bản:** Tối ưu lượng tử hóa động `ONNX Dynamic Quantization (INT8)` giúp giảm kích thước model từ $540\text{ MB} \to 135\text{ MB}$, tăng tốc độ suy luận CPU lên gấp $4.2\times$.
 
@@ -258,7 +280,7 @@ Dưới đây là kết quả đo kiểm thực tế trên máy trạm cục b�
 
 ### Tóm tắt kết quả kiểm thử phần mềm
 - **PyTest Suite:** **`105 / 105 tests PASSED (100%)`** trong $12.46\text{ giây}$.
-- **Pyrefly Type Checker:** **`0 errors`** (Sạch lỗi kiểu 100%).
+- **Pyrefly Type Checker:** **`0 errors, 0 warnings`** (Sạch lỗi kiểu 100%).
 - **Ruff Code Linter:** **`All checks passed!`** (100% tuân thủ chuẩn PEP 8 và Clean Code).
 
 ---
