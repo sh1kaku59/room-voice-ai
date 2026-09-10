@@ -1,0 +1,55 @@
+# =====================================================================
+# RooM Voice AI - Git Ignore Configuration
+# =====================================================================
+
+# 1. Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# 2. Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# 3. IDE & Temporary Files
+.idea/
+*.swp
+*.swo
+__pyrefly_virtual__/
+.vscode/launch.json
+
+# 4. Testing & Linters Cache
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# 5. Heavy AI Model Checkpoints & Large Binary Weights (>50MB)
+# Weights can be downloaded / fine-tuned via scripts/training/
+*.pt
+*.bin
+*.gguf
+*.onnx.data
+room_voice_ai/models/*.onnx
+room_voice_ai/models/phobert_nlu/*.pt
+room_voice_ai/models/phobert_nlu/*.onnx
+room_voice_ai/models/phobert_nlu/*.data
+room_voice_ai/models/phowhisper-small-ct2/*.bin
+
+# 6. Database, Raw training cache & Runtime logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.log.*
+*.npy
+*.npz
+data/
+room_voice_ai/data/
+

@@ -1,0 +1,19 @@
+{
+  "include": [
+    "room_voice_ai"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/__pyrefly_virtual__",
+    "**/.venv"
+  ],
+  "extraPaths": [
+    "./room_voice_ai",
+    "./room_voice_ai/src",
+    "./.venv/Lib/site-packages"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "reportMissingImports": "none",
+  "pythonVersion": "3.12"
+}

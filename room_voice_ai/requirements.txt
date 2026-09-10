@@ -1,0 +1,69 @@
+# ============================================================
+# RooM Voice Call Meeting AI - Python Dependencies
+# Architecture: Hybrid CPU (Module 1,2,4,5,7) + GPU (Module 3,6)
+# Hardware: Intel i7-12650H | RTX 3050 4GB VRAM | 8GB RAM
+# ============================================================
+
+# ── Core ────────────────────────────────────────────────────
+# numpy<2.0 required by deepfilternet 0.5.6
+numpy>=1.24.0,<2.0
+scipy>=1.11.0,<1.14
+asyncio-throttle>=1.0.2
+websockets>=12.0
+
+# ── ONNX Runtime (CPU Execution – AVX2) ─────────────────────
+onnxruntime>=1.17.0
+
+# ── PyTorch (CPU build) ──────────────────────────────────────
+# Required by: Silero VAD v5 (Module 1) + DeepFilterNet3 (Module 1) + ONNX export (Module 2)
+# torch>=2.6.0 required by transformers (CVE-2025-32434 security fix)
+# Install CPU build: pip install "torch>=2.6.0" --index-url https://download.pytorch.org/whl/cpu
+torch>=2.6.0
+
+# ── Module 1: Audio Preprocessing & Signal Enhancement (CPU) ─
+sounddevice>=0.4.6
+# webrtc-noise-gain: WebRTC APM (AEC3 + HPF + AGC) – requires MSVC Build Tools
+webrtc-noise-gain>=1.0.0
+# deepfilternet: DeepFilterNet3 Complex Deep Filtering ONNX Runtime CPU (DNSMOS 4.18)
+deepfilternet>=0.5.6
+
+# ── Module 2: Wake-word Detection (CPU, ONNX int8) ──────────
+# openwakeword: OpenWakeWord Custom Engine (Depthwise Conv + Conformer KWS)
+openwakeword>=0.6.0
+
+# ── Module 3: Real-time Vietnamese Streaming ASR (GPU) ───────
+# faster-whisper: PhoWhisper-small via CTranslate2 float16 (~900MB VRAM)
+faster-whisper>=1.0.3
+# ctranslate2: Quantization engine (float16/int8_float16 GPU CUDA Tensor Cores)
+ctranslate2>=4.0.0
+# huggingface_hub: Download PhoWhisper-small model weights from HuggingFace
+huggingface_hub>=0.23.0
+
+# ── Module 4: NLU & Intent Recognition (CPU, PhoBERT-Joint ONNX int8) ──
+# transformers: PhoBERT BPE Tokenizer (64k vocab, PhoBERT-base-v2)
+transformers>=4.40.0
+sentencepiece>=0.2.0
+# pyvi: Vietnamese word segmentation (Tier 1 – Word Segmenter, Module 4)
+pyvi>=0.1.1
+
+# ── Module 5: Context Manager (CPU, Standard Library) ────────
+# (No additional packages – pure Python stdlib)
+
+# ── Module 6: Brain & RAG (GPU, Qwen2.5-3B GGUF int4) ───────
+accelerate>=0.30.0
+# sentence-transformers: BGE-M3 Dense Embedding for Hybrid RAG
+sentence-transformers>=3.0.0
+# faiss-cpu: HNSW In-Memory Vector Store for Dense Retrieval
+faiss-cpu>=1.8.0
+# rank-bm25: Okapi BM25 Sparse Retrieval
+rank-bm25>=0.2.2
+
+# ── Testing ──────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+
+# ── Training Only (Module 2 & 4 – không cần cho inference) ──
+# Cài thêm khi train: pip install edge-tts soundfile librosa>=0.10,<1.0
+# edge-tts: Microsoft TTS tiếng Việt để sinh positive samples (Module 2)
+# soundfile: đọc/ghi WAV audio
+# librosa>=0.10,<1.0: time-stretching augmentation (tương thích numpy<2.0)

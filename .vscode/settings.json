@@ -1,0 +1,28 @@
+{
+  "python.defaultInterpreterPath": "C:/Users/wanbi/AppData/Local/Programs/Python/Python312/python.exe",
+  "python.analysis.diagnosticMode": "workspace",
+  "python.analysis.autoSearchPaths": true,
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}",
+    "${workspaceFolder}/room_voice_ai",
+    "${workspaceFolder}/room_voice_ai/src",
+    "C:/Users/wanbi/AppData/Local/Programs/Python/Python312/Lib/site-packages"
+  ],
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}",
+    "${workspaceFolder}/room_voice_ai",
+    "${workspaceFolder}/room_voice_ai/src",
+    "C:/Users/wanbi/AppData/Local/Programs/Python/Python312/Lib/site-packages"
+  ],
+  "pyrefly.interpreter": "C:/Users/wanbi/AppData/Local/Programs/Python/Python312/python.exe",
+  "pyrefly.searchPaths": [
+    "${workspaceFolder}",
+    "${workspaceFolder}/room_voice_ai",
+    "${workspaceFolder}/room_voice_ai/src"
+  ],
+  "python.testing.pytestArgs": [
+    "room_voice_ai/tests"
+  ],
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true
+}
