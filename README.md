@@ -84,20 +84,24 @@ flowchart TD
 ### Module 1: Audio Preprocessor & Adaptive Hangover Gating (CPU)
 - **Chuẩn tín hiệu:** 16,000 Hz Mono Float32, kích thước khung 32ms (512 samples / frame).
 - **Bộ lọc thông cao (HPF):** Butterworth bậc 2, tần số cắt $f_c = 80\text{ Hz}$ loại bỏ rung chấn mic và DC bias:
-  $$H(z) = \frac{b_0 + b_1 z^{-1} + b_2 z^{-2}}{1 + a_1 z^{-1} + a_2 z^{-2}}$$
+
+$$\displaystyle H(z) = \frac{b_0 + b_1 z^{-1} + b_2 z^{-2}}{1 + a_1 z^{-1} + a_2 z^{-2}}$$
+
 - **Tier 1 khử nhiễu:** WebRTC APM AEC3 + Noise Suppression.
 - **Tier 2 nâng cao:** DeepFilterNet3 (STFT ERB filterbank + deep complex UNet).
 - **Phát hiện tiếng nói (VAD):** Silero VAD v5 ONNX chạy thuần CPU kết hợp máy trạng thái Ramirez 2005:
   - Ngưỡng kích hoạt: $\theta_{\text{start}} = 0.50$
   - Ngưỡng duy trì: $\theta_{\text{end}} = 0.35$
-  - Độ trễ đóng cổng (Hangover): 8 frames = 256 ms ($T_{\text{hangover}} = 8 \times 32\text{ms}$).
+  - Độ trễ đóng cổng (Hangover): 8 frames = 256 ms ($T_{\text{hangover}} = 8 \times 32\text{ ms}$).
 - **Chuẩn hóa âm lượng (AGC):** Điều chỉnh Peak tự động đạt $-3\text{ dBFS}$ với gain trần $+12\text{ dB}$.
 
 ### Module 2: Streaming Wake-Word Verification (CPU)
 - **Mô hình:** `openWakeWord` (tương thích `Hey Siri` / `Hey Room` ONNX INT8).
 - **Vùng nhớ đệm:** Circular Ring Buffer 16,000 samples (1.0 giây âm thanh).
 - **Làm mịn tín hiệu thời gian:** Moving Average Filter cửa sổ $w=3$ loại bỏ các xung nhọn (spike noise):
-  $$\bar{p}_t = \frac{1}{3} \sum_{k=0}^{2} p_{t-k}$$
+
+$$\displaystyle \bar{p}_t = \frac{1}{3} \sum_{k=0}^{2} p_{t-k}$$
+
 - **Ngưỡng quyết định:**
   - $\theta_{\text{high}} = 0.70$ (Ngưỡng kích hoạt chính thức)
   - $\theta_{\text{low}} = 0.40$ (Ngưỡng duy trì trong luồng kích hoạt)
@@ -107,13 +111,17 @@ flowchart TD
 - **Mô hình:** PhoWhisper-Fast tối ưu hóa qua CTranslate2 / Faster-Whisper.
 - **Vùng đệm ngữ cảnh cuộn:** Buffer 3.0s với bước trượt 0.5s, overlap 200ms bảo tồn phụ âm đầu.
 - **Thuật toán cam kết văn bản (Local Agreement Committing):** Tìm kiếm tiền tố chung dài nhất (Longest Common Prefix - LCP) giữa 2 lần giải mã liên tiếp:
-  $$\operatorname{LCP}(T_k, T_{k+1}) \implies \text{Commit to Confirmed Prefix}$$
+
+$$\displaystyle \mathrm{LCP}(T_k, T_{k+1}) \implies \text{Commit to Confirmed Prefix}$$
+
 - **Hậu xử lý ngôn ngữ:** Chuẩn hóa tiếng lóng/thuật ngữ kỹ thuật (code-switching: `microservices`, `gRPC`, `jira`, `kpi`) và khôi phục dấu câu/viết hoa tiếng Việt.
 
 ### Module 4: Meeting NLU & Joint Multi-Task Intent/Slot (CPU)
 - **Mô hình:** PhoBERT-v2 Joint Multi-Task ONNX INT8 (chạy thuần CPU qua ONNX Runtime).
-- **Kiến trúc Loss đa nhiệm:**
-  $$\mathcal{L}_{\text{joint}} = \alpha \cdot \mathcal{L}_{\text{intent}} + (1-\alpha) \cdot \mathcal{L}_{\text{slot}}, \quad \alpha = 0.5$$
+- **Kiến trúc Loss đa nhiệm (Multi-Task Joint Loss):**
+
+$$\displaystyle \mathcal{L}_{\mathrm{joint}} = \alpha \cdot \mathcal{L}_{\mathrm{intent}} + (1-\alpha) \cdot \mathcal{L}_{\mathrm{slot}}, \quad \alpha = 0.5$$
+
 - **6 Ý định họp cốt lõi (Core Intents):**
   1. `Assign_Action_Item` (Giao việc/Phân công nhiệm vụ)
   2. `Create_Meeting_Summary` (Tóm tắt biên bản cuộc họp)
@@ -127,8 +135,10 @@ flowchart TD
 - **Bộ nhớ ngắn hạn (Working Memory):** FIFO Queue tối đa 12 lượt thoại gần nhất.
 - **Tóm tắt cuốn chiếu khi quá tải:** Khi số token vượt quá $70\%$ ngân sách ($>2100/3000\text{ tokens}$), kích hoạt nén các lượt cũ thành đoạn tóm tắt rolling summary.
 - **Bộ nhớ dài hạn (Archival Memory):** Lưu trữ có cấu trúc các Action Items, Quyết định kỹ thuật, và KPI vào SQLite + BGE-M3 Vector Store.
-- **Phát hiện chuyển chủ đề (Topic Shift Detection):** Tính toán Cosine Distance giữa embedding lượt thoại hiện tại và trọng tâm chủ đề:
-  $$\text{Cosine-Distance} = 1 - \frac{\vec{u} \cdot \vec{v}}{\|\vec{u}\|_2 \|\vec{v}\|_2} > 0.45 \implies \text{Topic Shift Event}$$
+- **Phát hiện chuyển chủ đề (Topic Shift Detection):** Tính toán khoảng cách Cosine giữa embedding lượt thoại hiện tại và trọng tâm chủ đề:
+
+$$\displaystyle d_{\mathrm{cosine}}(\vec{u}, \vec{v}) = 1 - \frac{\vec{u} \cdot \vec{v}}{\|\vec{u}\|_2 \|\vec{v}\|_2} > 0.45 \implies \text{Topic Shift Event}$$
+
 - **Xếp gói ngân sách ngữ cảnh (Knapsack Pruning):** Lắp ghép 4 khối prompt (Hệ thống, Tóm tắt cũ, Lượt thoại mới, Tài liệu RAG) đảm bảo không vượt quá $3,000\text{ tokens}$.
 
 ### Module 6: Core AI Brain & Dense-Sparse Hybrid RAG (GPU/CPU)
@@ -137,7 +147,9 @@ flowchart TD
   - Dense Vector: BGE-M3 + FAISS L2/Cosine Search.
   - Sparse Lexical: Okapi BM25 ($k_1=1.5, b=0.75$).
   - Thuật toán dung hợp xếp hạng (Reciprocal Rank Fusion - RRF, $k=60$):
-    $$\operatorname{Score}_{\mathrm{RRF}}(d) = \sum_{m \in \{\mathrm{dense}, \mathrm{sparse}\}} \frac{1}{60 + r_m(d)}$$
+
+$$\displaystyle S_{\mathrm{RRF}}(d) = \sum_{m \in \{\mathrm{dense}, \mathrm{sparse}\}} \frac{1}{60 + r_m(d)}$$
+
 - **Ràng buộc định dạng (Constrained JSON Grammar Decoding):** Ép buộc LLM sinh đúng $100\%$ JSON Schema định sẵn cho các Function Calls (`create_jira_task`, `summarize_meeting`).
 
 ### Module 7: Multimodal Output Generation & Real-Time Delivery (CPU)
@@ -161,7 +173,7 @@ flowchart TD
 - **Kiến trúc mạng:** `vinai/phobert-base-v2` làm Backbone Encoder + 2 Linear Classification Heads độc lập:
   - Intent Head: Softmax 6 lớp ý định họp.
   - Slot Head: Linear CRF/Softmax 11 nhãn BIO (`B-TASK`, `I-TASK`, `B-PERSON`, `I-PERSON`, `B-TIME`, `I-TIME`, `B-PRIORITY`, `I-PRIORITY`, `B-PROJECT`, `I-PROJECT`, `O`).
-- **Hàm mất mát:** $\mathcal{L}_{\text{joint}} = 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{intent}}, y_{\text{intent}}) + 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{slot}}, y_{\text{slot}})$.
+- **Hàm mất mát:** $\mathcal{L}_{\mathrm{joint}} = 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{intent}}, y_{\text{intent}}) + 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{slot}}, y_{\text{slot}})$.
 - **Tối ưu hóa:** AdamW, learning rate $3 \times 10^{-5}$, linear warmup 10%, weight decay 0.01.
 - **Xuất bản:** Tối ưu lượng tử hóa động `ONNX Dynamic Quantization (INT8)` giúp giảm kích thước model từ $540\text{ MB} \to 135\text{ MB}$, tăng tốc độ suy luận CPU lên gấp $4.2\times$.
 
