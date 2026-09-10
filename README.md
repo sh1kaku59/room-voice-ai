@@ -172,8 +172,10 @@ $$\displaystyle S_{\mathrm{RRF}}(d) = \sum_{m \in \{\mathrm{dense}, \mathrm{spar
 ### 2. Module 4: Huấn luyện PhoBERT-Joint Multi-Task (`train_module4_phobert_joint.py`)
 - **Kiến trúc mạng:** `vinai/phobert-base-v2` làm Backbone Encoder + 2 Linear Classification Heads độc lập:
   - Intent Head: Softmax 6 lớp ý định họp.
-  - Slot Head: Linear CRF/Softmax 11 nhãn BIO (`B-TASK`, `I-TASK`, `B-PERSON`, `I-PERSON`, `B-TIME`, `I-TIME`, `B-PRIORITY`, `I-PRIORITY`, `B-PROJECT`, `I-PROJECT`, `O`).
-- **Hàm mất mát:** $\mathcal{L}_{\mathrm{joint}} = 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{intent}}, y_{\text{intent}}) + 0.5 \cdot \text{CrossEntropy}(\hat{y}_{\text{slot}}, y_{\text{slot}})$.
+- **Hàm mất mát (Multi-Task Joint Loss):**
+
+$$\displaystyle \mathcal{L}_{\mathrm{joint}} = 0.5 \cdot \mathcal{L}_{\mathrm{intent}}(\hat{y}_{\mathrm{intent}}, y_{\mathrm{intent}}) + 0.5 \cdot \mathcal{L}_{\mathrm{slot}}(\hat{y}_{\mathrm{slot}}, y_{\mathrm{slot}})$$
+
 - **Tối ưu hóa:** AdamW, learning rate $3 \times 10^{-5}$, linear warmup 10%, weight decay 0.01.
 - **Xuất bản:** Tối ưu lượng tử hóa động `ONNX Dynamic Quantization (INT8)` giúp giảm kích thước model từ $540\text{ MB} \to 135\text{ MB}$, tăng tốc độ suy luận CPU lên gấp $4.2\times$.
 
