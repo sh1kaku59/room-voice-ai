@@ -52,4 +52,6 @@ room_voice_ai/models/phowhisper-small-ct2/*.bin
 *.npz
 data/
 room_voice_ai/data/
-
+# 7. Release Staging & Scratch
+hf_model_release/
+scratch/

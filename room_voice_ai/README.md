@@ -97,16 +97,18 @@ $$\displaystyle H(z) = \frac{b_0 + b_1 z^{-1} + b_2 z^{-2}}{1 + a_1 z^{-1} + a_2
 - **Chuẩn hóa âm lượng (AGC):** Điều chỉnh Peak tự động đạt $-3\text{ dBFS}$ với gain trần $+12\text{ dB}$.
 
 ### Module 2: Streaming Wake-Word Verification (CPU)
-- **Mô hình:** `openWakeWord` (tương thích `Hey Siri` / `Hey Room` ONNX INT8).
-- **Vùng nhớ đệm:** Circular Ring Buffer 16,000 samples (1.0 giây âm thanh).
-- **Làm mịn tín hiệu thời gian:** Moving Average Filter cửa sổ $w=3$ loại bỏ các xung nhọn (spike noise):
+- **Mô hình:** `openWakeWord` (Depthwise Separable Conv + Conformer KWS ONNX INT8) nhận diện từ khóa gọi trợ lý: `"AI Star Light"`, `"Star Light ơi"`, `"AI Trợ lý"`, `"Hey Star Light"`, `"Starlight ơi"`.
+- **Vùng nhớ đệm:** Circular Audio RingBuffer 24,000 samples (1.5 giây âm thanh @ 16 kHz Mono).
+- **Trích xuất đặc trưng:** Log-Mel Spectrogram 80 dải tần (cửa sổ FFT 25ms, bước nhảy 10ms, bước luồng 32ms = 512 samples).
+- **Làm mịn tín hiệu thời gian:** Moving Average Filter qua $K=4$ khung hình loại bỏ các xung nhọn (spike noise):
 
-$$\displaystyle \bar{p}_t = \frac{1}{3} \sum_{k=0}^{2} p_{t-k}$$
+$$\displaystyle P_{\mathrm{smooth}}(t) = \frac{1}{4} \sum_{i=0}^{3} P_{\mathrm{raw}}(t-i)$$
 
-- **Ngưỡng quyết định:**
-  - $\theta_{\text{high}} = 0.70$ (Ngưỡng kích hoạt chính thức)
-  - $\theta_{\text{low}} = 0.40$ (Ngưỡng duy trì trong luồng kích hoạt)
-  - Khóa chống kích hoạt lặp (Cooldown Lockout): 1.5 giây sau khi trigger.
+- **Ngưỡng quyết định (Cơ chế Hysteresis kép):**
+  - $\theta_{\mathrm{wake}} = \theta_{\mathrm{start}} = 0.75$ (Ngưỡng kích hoạt phát sự kiện `EVENT_WAKEUP`)
+  - $\theta_{\mathrm{reset}} = 0.40$ (Ngưỡng hoàn nguyên trạng thái sẵn sàng lắng nghe)
+  - Khóa chống kích hoạt lặp (Refractory Debounce Lockout): $2.0\text{ giây}$ ($N_{\mathrm{debounce}} \approx 62\text{ frames}$ ở bước nhảy $32\text{ms}$).
+  - Độ trễ suy luận siêu nhẹ trên CPU: $\le 3.5\text{ ms / frame}$ ($0\text{ MB}$ GPU VRAM).
 
 ### Module 3: Streaming Vietnamese ASR & Local Agreement (GPU/CPU)
 - **Mô hình:** PhoWhisper-Fast tối ưu hóa qua CTranslate2 / Faster-Whisper.
@@ -166,9 +168,9 @@ $$\displaystyle S_{\mathrm{RRF}}(d) = \sum_{m \in \{\mathrm{dense}, \mathrm{spar
 ## 3. Phương pháp huấn luyện & Xuất mô hình (Training & Model Export)
 
 ### 1. Module 2: Huấn luyện mô hình Wake-Word (`train_module2_openwakeword.py`)
-- **Tập dữ liệu:** 50,000 mẫu âm thanh dương tính (Positive clips phát âm "Hey Room / Hey Siri") kết hợp với dữ liệu âm thanh nền phòng họp, tiếng gõ bàn phím, tiếng ồn điều hòa từ AudioSet và MUSAN.
+- **Tập dữ liệu:** 50,000 mẫu âm thanh dương tính (Positive clips phát âm các biến thể từ khóa *"AI Star Light"*, *"Star Light ơi"*, *"AI Trợ lý"*, *"Hey Star Light"*, *"Starlight ơi"*) kết hợp với dữ liệu âm thanh nền phòng họp, tiếng gõ bàn phím, tiếng ồn điều hòa từ AudioSet và MUSAN.
 - **Data Augmentation:** Tự động áp dụng Room Impulse Response (RIR), thay đổi tốc độ $\pm 10\%$, thêm Gaussian Noise và nhiễu viễn thông.
-- **Đầu ra:** Mô hình TFLite / ONNX INT8 siêu nhẹ ($< 3\text{ MB}$), CPU Inference $< 3\text{ ms/frame}$.
+- **Đầu ra:** Mô hình ONNX INT8 siêu nhẹ ($< 3\text{ MB}$), CPU Inference $\le 3.5\text{ ms/frame}$.
 
 ### 2. Module 4: Huấn luyện PhoBERT-Joint Multi-Task (`train_module4_phobert_joint.py`)
 - **Kiến trúc mạng:** `vinai/phobert-base-v2` làm Backbone Encoder + 2 Linear Classification Heads độc lập:
