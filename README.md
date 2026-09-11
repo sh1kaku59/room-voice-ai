@@ -3,6 +3,7 @@
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 [![PyTorch 2.14+](https://img.shields.io/badge/PyTorch-2.14%2B-ee4c2c.svg)](https://pytorch.org/)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-v1.24-005ced.svg)](https://onnxruntime.ai/)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model%20Hub-yellow.svg)](https://huggingface.co/sh1kaku/room-voice-ai)
 [![Test Suite](https://img.shields.io/badge/PyTest-105%2F105%20Passed-brightgreen.svg)]()
 [![Code Quality](https://img.shields.io/badge/Ruff_Linter-Passing-success.svg)]()
 [![Type Checker](https://img.shields.io/badge/Pyrefly-0_Errors-brightgreen.svg)]()
