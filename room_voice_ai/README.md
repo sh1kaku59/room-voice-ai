@@ -1,6 +1,7 @@
 # RooM Voice AI 🎙️: Real-Time Multimodal Voice AI Assistant for Enterprise Meetings
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22761612.svg)](https://doi.org/10.5281/zenodo.22761612)
+[![Paper](https://img.shields.io/badge/Paper-Zenodo_Preprint-orange.svg)](https://zenodo.org/records/22761612)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 [![PyTorch 2.14+](https://img.shields.io/badge/PyTorch-2.14%2B-ee4c2c.svg)](https://pytorch.org/)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-v1.24-005ced.svg)](https://onnxruntime.ai/)
@@ -22,7 +23,8 @@
 - [5. Cấu trúc thư mục mã nguồn (Project Structure)](#5-cấu-trúc-thư-mục-mã-nguồn-project-structure)
 - [6. Bảng thông số KPI & Nghiệm thu Benchmark](#6-bảng-thông-số-kpi--nghiệm-thu-benchmark)
 - [7. Hướng dẫn cài đặt & Chạy thực nghiệm](#7-hướng-dẫn-cài-đặt--chạy-thực-nghiệm)
-- [8. Trích dẫn & Tài liệu tham khảo (References)](#8-trích-dẫn--tài-liệu-tham-khảo-references)
+- [8. Công trình Nghiên cứu & Trích dẫn Học thuật (Research Paper & Citation)](#8-công-trình-nghiên-cứu--trích-dẫn-học-thuật-research-paper--citation)
+- [9. Tài liệu tham khảo (References)](#9-tài-liệu-tham-khảo-references)
 
 ---
 
@@ -39,7 +41,7 @@ flowchart TD
 
     BUS{{"⚡ In-Memory Async EventBus (asyncio.Queue) ⚡"}}
 
-    M2["<b>MODULE 2 · Wake-Word (CPU)</b><br/>• Audio Ring Buffer (1.0s)<br/>• openWakeWord ONNX INT8<br/>• Moving Average (w=3)<br/>• Hysteresis 0.7/0.4 + 1.5s Cooldown"]
+    M2["<b>MODULE 2 · Wake-Word (CPU)</b><br/>• Audio Ring Buffer (1.5s / 24k samples)<br/>• openWakeWord ONNX INT8<br/>• Moving Average (K=4)<br/>• Hysteresis 0.75/0.40 + 2.0s Cooldown"]
 
     M3["<b>MODULE 3 · Streaming ASR (GPU/CPU)</b><br/>• PhoWhisper-Fast (CTranslate2)<br/>• Context Buffer (3.0s / 200ms Overlap)<br/>• LCP Local Agreement Committing<br/>• Punctuation & Code-Switching"]
 
@@ -346,8 +348,36 @@ python room_voice_ai/main_pipeline.py
 ```
 
 ---
+ 
+## 8. Công trình Nghiên cứu & Trích dẫn Học thuật (Research Paper & Citation)
 
-## 8. Trích dẫn & Tài liệu tham khảo (References)
+Công trình nghiên cứu khoa học và thiết kế kiến trúc của **RooM Voice AI** đã được đăng ký và xuất bản dưới dạng Preprint mở (Open Access) trên **Zenodo**:
+
+* **Tên bài báo:** *RooM: Real-Time Event-Driven Streaming Architecture for Vietnamese Voice Call Meeting AI*
+* **Tác giả:** Vu, Ngoc Minh (Researcher) (*Independent AI Researcher, Ho Chi Minh City, Vietnam*)
+* **DOI:** [10.5281/zenodo.22761612](https://doi.org/10.5281/zenodo.22761612)
+* **Zenodo Record URL:** [https://zenodo.org/records/22761612](https://zenodo.org/records/22761612)
+* **Bản quyền học thuật:** Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+### Trích dẫn chuẩn BibTeX (Cite this work):
+```bibtex
+@article{vu2026room,
+  title={RooM: Real-Time Event-Driven Streaming Architecture for Vietnamese Voice Call Meeting AI},
+  author={Vu, Ngoc Minh},
+  journal={Zenodo},
+  year={2026},
+  month={September},
+  doi={10.5281/zenodo.22761612},
+  url={https://doi.org/10.5281/zenodo.22761612}
+}
+```
+
+### Trích dẫn chuẩn APA:
+> Vu, N. M. (2026). *RooM: Real-Time Event-Driven Streaming Architecture for Vietnamese Voice Call Meeting AI* (Version v1.0). Zenodo. https://doi.org/10.5281/zenodo.22761612
+
+---
+
+## 9. Tài liệu tham khảo (References)
 
 1. **[DeepFilterNet3]** H. Schröter, A. N. Rosenkranz, A. H. Maier, *"DeepFilterNet: Low Complexity Speech Enhancement Framework for Full-Band Audio using Deep Filtering"*, Interspeech 2023. arXiv:[2305.08227](https://arxiv.org/abs/2305.08227).
 2. **[Silero VAD]** Silero Team, *"Silero VAD: Pre-trained Enterprise-grade Voice Activity Detector"*, GitHub snakers4/silero-vad, 2024.
@@ -362,3 +392,4 @@ python room_voice_ai/main_pipeline.py
 
 ## 📜 Giấy phép & Bản quyền (License)
 Dự án được phân phối dưới giấy phép mã nguồn mở **MIT License**. Tự do sử dụng cho mục đích nghiên cứu học thuật và phát triển công nghệ trợ lý giọng nói phòng họp AI.
+
