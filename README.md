@@ -1,5 +1,6 @@
 # RooM Voice AI 🎙️: Real-Time Multimodal Voice AI Assistant for Enterprise Meetings
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22761612.svg)](https://doi.org/10.5281/zenodo.22761612)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 [![PyTorch 2.14+](https://img.shields.io/badge/PyTorch-2.14%2B-ee4c2c.svg)](https://pytorch.org/)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-v1.24-005ced.svg)](https://onnxruntime.ai/)
