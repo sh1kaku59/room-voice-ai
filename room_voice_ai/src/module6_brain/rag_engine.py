@@ -138,11 +138,18 @@ class DenseSparseHybridRAG:
     Kết hợp BGE-M3 Dense Embeddings và BM25 Sparse Lexical Search qua RRF.
     """
 
-    def __init__(self, rrf_k: int = 60) -> None:
+    # Bộ nhớ đệm cấp lớp giúp tái sử dụng mô hình BAAI/bge-m3 trên CPU (0 MB VRAM) và vector đã nhúng
+    _DENSE_MODEL_CACHE: dict[str, Any] = {}
+    _CORPUS_EMB_CACHE: dict[tuple[str, ...], np.ndarray] = {}
+    _QUERY_EMB_CACHE: dict[str, np.ndarray] = {}
+
+    def __init__(self, rrf_k: int = 60, device: str = "cpu") -> None:
         self.rrf_k = rrf_k
-        self._dense_model = None
-        self._faiss_index = None
-        self._bm25: LightweightOkapiBM25 | Any | None = None
+        # Ghim cứng Dense Embedding của RAG trên CPU (0 MB VRAM) để bảo vệ ngân sách 4GB VRAM cho ASR + LLM
+        self.device: str = "cpu" if device != "cpu" else device
+        self._dense_model: Any = None
+        self._faiss_index: Any = None
+        self._bm25: Any = None
         self._documents: list[dict[str, Any]] = []
 
         # Tự động nạp bộ tri thức mặc định
@@ -152,30 +159,82 @@ class DenseSparseHybridRAG:
     # Lifecycle & Initialization
     # ------------------------------------------------------------------
     def load(self) -> None:
-        """Tải embedding model BGE-M3 và khôi phục index nếu có."""
+        """Tải embedding model BGE-M3 trên CPU và khôi phục index nếu có."""
         self._load_dense_model()
         self._load_faiss_or_fallback()
-        logger.info("[Module6/RAG] Hybrid RAG Engine fully initialized.")
+        if self._dense_model is not None and self._faiss_index is None and self._documents:
+            self.index_documents(self._documents)
+        logger.info("[Module6/RAG] Hybrid RAG Engine fully initialized (device=cpu, 0 MB VRAM).")
+
+    @staticmethod
+    def _resolve_local_bge_snapshot(model_name_or_path: str) -> str:
+        """Tìm đường dẫn snapshot cục bộ của BAAI/bge-m3 để nạp tức thì không cần truy vấn mạng."""
+        local_bge_dir = settings.BASE_DIR / "models" / "bge-m3"
+        if local_bge_dir.exists() and (local_bge_dir / "config.json").exists():
+            return str(local_bge_dir)
+
+        from pathlib import Path
+
+        hf_repo_dir = Path.home() / ".cache" / "huggingface" / "hub" / "models--BAAI--bge-m3" / "snapshots"
+        if hf_repo_dir.exists():
+            for snap in hf_repo_dir.iterdir():
+                if snap.is_dir() and (snap / "config.json").exists() and (
+                    (snap / "pytorch_model.bin").exists() or (snap / "model.safetensors").exists()
+                ):
+                    return str(snap)
+        return model_name_or_path
 
     def _load_dense_model(self) -> None:
         model_name_or_path = getattr(settings, "RAG_DENSE_MODEL", "BAAI/bge-m3")
-        # Chỉ tải trực tiếp nếu là đường dẫn local hoặc model đã cache local
-        if os.path.isdir(model_name_or_path) or os.path.exists(model_name_or_path):
-            try:
-                from sentence_transformers import SentenceTransformer  # type: ignore
+        resolved_path = self._resolve_local_bge_snapshot(model_name_or_path)
 
-                self._dense_model = SentenceTransformer(model_name_or_path, local_files_only=True)
-                logger.info(f"[Module6/RAG] Dense model loaded locally from '{model_name_or_path}'.")
+        if resolved_path in self._DENSE_MODEL_CACHE:
+            self._dense_model = self._DENSE_MODEL_CACHE[resolved_path]
+            logger.info(f"[Module6/RAG] Reusing cached CPU Dense model '{model_name_or_path}' (0 MB VRAM).")
+            return
+
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+        # Chỉ tải trực tiếp nếu là đường dẫn local hoặc model đã cache local (ép cứng device="cpu")
+        if os.path.isdir(resolved_path) or os.path.exists(resolved_path):
+            try:
+                import importlib
+
+                st_mod: Any = importlib.import_module("sentence_transformers")
+                SentenceTransformer: Any = st_mod.SentenceTransformer
+
+                self._dense_model = SentenceTransformer(
+                    resolved_path,
+                    device="cpu",
+                    local_files_only=True,
+                )
+                _ = self._dense_model.encode(["warmup"], normalize_embeddings=True, show_progress_bar=False)
+                self._DENSE_MODEL_CACHE[resolved_path] = self._dense_model
+                logger.info(
+                    f"[Module6/RAG] Dense model loaded locally from '{resolved_path}' on CPU (0 MB VRAM)."
+                )
                 return
             except Exception as e:
                 logger.warning(f"[Module6/RAG] Failed to load local SentenceTransformer: {e}")
 
-        # Thử nạp từ local cache HF nếu có sẵn mà không gửi request mạng
+        # Thử nạp từ local cache HF nếu có sẵn mà không gửi request mạng (ép cứng device="cpu")
         try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
+            import importlib
 
-            self._dense_model = SentenceTransformer(model_name_or_path, local_files_only=True)
-            logger.info(f"[Module6/RAG] Dense model '{model_name_or_path}' loaded from local cache.")
+            st_mod_cache: Any = importlib.import_module("sentence_transformers")
+            SentenceTransformerCache: Any = st_mod_cache.SentenceTransformer
+
+            self._dense_model = SentenceTransformerCache(
+                model_name_or_path,
+                device="cpu",
+                local_files_only=True,
+            )
+            _ = self._dense_model.encode(["warmup"], normalize_embeddings=True, show_progress_bar=False)
+            self._DENSE_MODEL_CACHE[resolved_path] = self._dense_model
+            logger.info(
+                f"[Module6/RAG] Dense model '{model_name_or_path}' loaded from local cache on CPU (0 MB VRAM)."
+            )
         except Exception:
             logger.info(
                 f"[Module6/RAG] Dense model '{model_name_or_path}' not cached locally. "
@@ -185,7 +244,9 @@ class DenseSparseHybridRAG:
 
     def _load_faiss_or_fallback(self) -> None:
         try:
-            import faiss  # type: ignore
+            import importlib
+
+            faiss: Any = importlib.import_module("faiss")
 
             index_path = f"{settings.RAG_VECTOR_DB_PATH}/index.faiss"
             if os.path.exists(index_path):
@@ -212,12 +273,23 @@ class DenseSparseHybridRAG:
         # 1. Build Dense Index
         if self._dense_model is not None:
             try:
-                import faiss  # type: ignore
+                import importlib
 
-                embeddings = self._dense_model.encode(texts, normalize_embeddings=True)
+                faiss: Any = importlib.import_module("faiss")
+                corpus_key = tuple(texts)
+                if corpus_key in self._CORPUS_EMB_CACHE:
+                    embeddings = self._CORPUS_EMB_CACHE[corpus_key]
+                else:
+                    embeddings = self._dense_model.encode(
+                        texts,
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    ).astype(np.float32)
+                    self._CORPUS_EMB_CACHE[corpus_key] = embeddings
+
                 dim = embeddings.shape[1]
                 index = faiss.IndexFlatIP(dim)
-                index.add(embeddings.astype(np.float32))
+                index.add(embeddings)
                 self._faiss_index = index
                 logger.info(f"[Module6/RAG] FAISS Dense Index built ({len(texts)} docs, dim={dim}).")
             except Exception as e:
@@ -226,7 +298,10 @@ class DenseSparseHybridRAG:
         # 2. Build Sparse BM25 Index
         tokenized_corpus = [self._tokenize_vietnamese(t) for t in texts]
         try:
-            from rank_bm25 import BM25Okapi  # type: ignore
+            import importlib
+
+            bm25_mod: Any = importlib.import_module("rank_bm25")
+            BM25Okapi: Any = bm25_mod.BM25Okapi
 
             self._bm25 = BM25Okapi(tokenized_corpus)
         except Exception:
@@ -278,7 +353,15 @@ class DenseSparseHybridRAG:
 
         if self._dense_model is not None and self._faiss_index is not None:
             try:
-                q_emb = self._dense_model.encode([query], normalize_embeddings=True).astype(np.float32)
+                if query in self._QUERY_EMB_CACHE:
+                    q_emb = self._QUERY_EMB_CACHE[query]
+                else:
+                    q_emb = self._dense_model.encode(
+                        [query],
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    ).astype(np.float32)
+                    self._QUERY_EMB_CACHE[query] = q_emb
                 _, indices = self._faiss_index.search(q_emb, min(k, len(self._documents)))
                 return [int(i) for i in indices[0] if i >= 0]
             except Exception:

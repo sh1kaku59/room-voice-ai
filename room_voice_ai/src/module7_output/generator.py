@@ -25,10 +25,12 @@ Kiến trúc 3 tầng:
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -40,6 +42,46 @@ from src.common.payloads import BrainResponsePayload, OutputPayload
 
 logger = logging.getLogger(__name__)
 
+# Bảng ánh xạ dấu thanh tiếng Việt (Unicode Combining Diacritics) sang mã thanh điệu IPA/eSpeak (1..6)
+_VI_TONE_COMBINING_MAP: dict[str, str] = {
+    "\u0300": "2",  # Thanh huyền (à)
+    "\u0303": "3",  # Thanh ngã   (ã)
+    "\u0309": "4",  # Thanh hỏi   (ả)
+    "\u0301": "5",  # Thanh sắc   (á)
+    "\u0323": "6",  # Thanh nặng  (ạ)
+}
+
+# Bảng chuyển đổi cụm phụ âm ghép (Digraphs/Trigraphs) tiếng Việt sang ký hiệu âm vị IPA
+_VI_DIGRAPH_IPA: list[tuple[str, str]] = [
+    ("ngh", "ŋ"),
+    ("ng", "ŋ"),
+    ("nh", "ɲ"),
+    ("ch", "c"),
+    ("tr", "ʈ"),
+    ("th", "tʰ"),
+    ("ph", "f"),
+    ("kh", "x"),
+    ("gh", "ɣ"),
+    ("gi", "z"),
+    ("qu", "kw"),
+]
+
+# Bảng chuyển đổi nguyên âm và phụ âm đơn tiếng Việt sang ký hiệu âm vị IPA
+_VI_CHAR_IPA: dict[str, str] = {
+    "đ": "ɗ",
+    "d": "z",
+    "g": "ɣ",
+    "ă": "a",
+    "â": "ə",
+    "ê": "e",
+    "ô": "o",
+    "ơ": "əː",
+    "ư": "ɯ",
+    "e": "ɛ",
+    "o": "ɔ",
+    "y": "i",
+}
+
 
 class Module7MultimodalOutputGenerator:
     """
@@ -48,6 +90,8 @@ class Module7MultimodalOutputGenerator:
     """
 
     SAMPLE_RATE = 24000  # 24kHz Float32 PCM Mono chuẩn studio/WebRTC
+    _TTS_SESSION_CACHE: dict[str, Any] = {}
+    _TTS_CONFIG_CACHE: dict[str, dict[str, Any]] = {}
 
     def __init__(
         self,
@@ -65,9 +109,12 @@ class Module7MultimodalOutputGenerator:
         # 2. Pattern tách vế câu theo dấu câu (Punctuation Splitter)
         self.clause_pattern = re.compile(r"([^,.:;?!]+[,.:;?!]*)")
 
-        # 3. Khởi tạo Neural TTS Engine Session
+        # 3. Khởi tạo Neural TTS Engine Session & Phoneme Map
         self.tts_session: Any | None = None
         self._is_mock_tts = True
+        self._model_sample_rate: int = 22050
+        self._phoneme_id_map: dict[str, list[int]] = {}
+        self._inference_scales: np.ndarray = np.array([0.667, 1.0, 0.8], dtype=np.float32)
         self._load_tts()
 
         # 4. Đăng ký nhận sự kiện từ Module 6 (BRAIN_RESPONSE)
@@ -86,13 +133,44 @@ class Module7MultimodalOutputGenerator:
         self._load_tts()
 
     def _load_tts(self) -> None:
-        """Tải mô hình Kokoro-82M ONNX trên CPU AVX2."""
+        """Tải mô hình Vietnamese Neural TTS ONNX trên CPU AVX2 kèm bảng ánh xạ âm vị IPA."""
         if os.path.exists(self.tts_onnx_path):
+            abs_path = os.path.abspath(self.tts_onnx_path)
+            json_path = f"{self.tts_onnx_path}.json"
             try:
-                import onnxruntime as ort  # type: ignore
+                # 1. Nạp cấu hình âm vị (.onnx.json) nếu hiện diện
+                if abs_path in self._TTS_CONFIG_CACHE:
+                    cfg = self._TTS_CONFIG_CACHE[abs_path]
+                elif os.path.exists(json_path):
+                    with open(json_path, encoding="utf-8") as f:
+                        cfg = json.load(f)
+                    self._TTS_CONFIG_CACHE[abs_path] = cfg
+                else:
+                    cfg = {}
+
+                if cfg:
+                    self._model_sample_rate = int(cfg.get("audio", {}).get("sample_rate", 22050))
+                    self._phoneme_id_map = cfg.get("phoneme_id_map", {})
+                    inf_cfg = cfg.get("inference", {})
+                    self._inference_scales = np.array(
+                        [
+                            float(inf_cfg.get("noise_scale", 0.667)),
+                            float(inf_cfg.get("length_scale", 1.0)),
+                            float(inf_cfg.get("noise_w", 0.8)),
+                        ],
+                        dtype=np.float32,
+                    )
+
+                # 2. Khởi tạo hoặc tái sử dụng ONNX InferenceSession trên CPU AVX2
+                if abs_path in self._TTS_SESSION_CACHE:
+                    self.tts_session = self._TTS_SESSION_CACHE[abs_path]
+                    self._is_mock_tts = False
+                    return
+
+                ort: Any = importlib.import_module("onnxruntime")
 
                 opts = ort.SessionOptions()
-                opts.intra_op_num_threads = 2
+                opts.intra_op_num_threads = 4
                 opts.inter_op_num_threads = 1
                 opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
@@ -102,7 +180,16 @@ class Module7MultimodalOutputGenerator:
                     providers=["CPUExecutionProvider"],
                 )
                 self._is_mock_tts = False
-                logger.info(f"[Module 7] Nạp mô hình Kokoro-82M ONNX thành công từ {self.tts_onnx_path} (CPU AVX2).")
+                self._TTS_SESSION_CACHE[abs_path] = self.tts_session
+
+                # 3. Warmup suy luận ONNX 1 lần để khởi tạo bộ nhớ đệm Arena trên CPU
+                if self._phoneme_id_map:
+                    _ = self._synthesize_clause_to_pcm("Xin chào,")
+
+                logger.info(
+                    f"[Module 7] Nạp mô hình Vietnamese Neural TTS ONNX thành công từ {self.tts_onnx_path} "
+                    f"(CPU AVX2, Native SR={self._model_sample_rate}Hz -> Output SR={self.SAMPLE_RATE}Hz, 0 MB VRAM)."
+                )
                 return
             except Exception as e:
                 logger.warning(f"[Module 7] ONNX load failed: {e}. Chuyển sang High-Precision Fallback TTS Engine.")
@@ -255,9 +342,69 @@ class Module7MultimodalOutputGenerator:
                 pcm_audio = self._synthesize_clause_to_pcm(normalized)
                 yield remaining_clause, pcm_audio
 
+    def _text_to_phoneme_ids(self, text: str) -> np.ndarray:
+        """
+        Chuyển đổi văn bản tiếng Việt sang chuỗi mã âm vị IPA (Phoneme IDs) kèm dấu thanh (1..6)
+        với cơ chế xen kẽ token đệm (Blank/Pad ID = 0) chuẩn kiến trúc VITS/Piper/Kokoro ONNX.
+        """
+        id_map = self._phoneme_id_map
+        pad_ids = id_map.get("_", [0])
+        bos_ids = id_map.get("^", [1])
+        eos_ids = id_map.get("$", [2])
+        space_ids = id_map.get(" ", [3])
+
+        phoneme_ids: list[int] = list(bos_ids) + list(pad_ids)
+        tokens = re.findall(r"\w+|[^\w\s]", text.lower(), flags=re.UNICODE)
+
+        for idx, tok in enumerate(tokens):
+            if idx > 0 and re.match(r"\w+", tok):
+                for sid in space_ids:
+                    phoneme_ids.append(sid)
+                    phoneme_ids.extend(pad_ids)
+
+            if not re.match(r"\w+", tok):
+                # Dấu câu (, . ? ! : ;)
+                for ch in tok:
+                    if ch in id_map:
+                        for pid in id_map[ch]:
+                            phoneme_ids.append(pid)
+                            phoneme_ids.extend(pad_ids)
+                continue
+
+            # Tách dấu thanh tiếng Việt khỏi nguyên âm bằng chuẩn hóa NFD
+            nfd = unicodedata.normalize("NFD", tok)
+            tone = "1"
+            base_chars: list[str] = []
+            for ch in nfd:
+                if ch in _VI_TONE_COMBINING_MAP:
+                    tone = _VI_TONE_COMBINING_MAP[ch]
+                else:
+                    base_chars.append(ch)
+            word_nfc = unicodedata.normalize("NFC", "".join(base_chars))
+
+            # Ánh xạ cụm phụ âm ghép và nguyên âm sang ký hiệu IPA
+            ipa_word = word_nfc
+            for src_di, dst_ipa in _VI_DIGRAPH_IPA:
+                if ipa_word.startswith(src_di):
+                    ipa_word = dst_ipa + ipa_word[len(src_di) :]
+                    break
+            ipa_chars: list[str] = []
+            for ch in ipa_word:
+                ipa_chars.append(_VI_CHAR_IPA.get(ch, ch))
+            ipa_seq = "".join(ipa_chars) + tone
+
+            for ch in ipa_seq:
+                if ch in id_map:
+                    for pid in id_map[ch]:
+                        phoneme_ids.append(pid)
+                        phoneme_ids.extend(pad_ids)
+
+        phoneme_ids.extend(eos_ids)
+        return np.array([phoneme_ids], dtype=np.int64)
+
     def _synthesize_clause_to_pcm(self, clause_text: str) -> np.ndarray:
         """
-        Suy luận mô hình Kokoro-82M ONNX để tạo mảng PCM Audio Mono Float32 24,000 Hz (< 100ms trên CPU).
+        Suy luận mô hình Vietnamese Neural TTS ONNX để tạo mảng PCM Audio Mono Float32 24,000 Hz (< 100ms trên CPU).
         """
         if not clause_text.strip():
             return np.zeros(0, dtype=np.float32)
@@ -265,12 +412,37 @@ class Module7MultimodalOutputGenerator:
         # 1. Nếu có session ONNX thực tế
         if self.tts_session is not None and not self._is_mock_tts:
             try:
-                # Chuẩn bị input cho Kokoro ONNX
-                inputs = {"text": np.array([[clause_text]], dtype=object)}
-                outputs = self.tts_session.run(None, inputs)
-                raw_audio = outputs[0].squeeze()
-                if raw_audio.dtype != np.float32:
-                    raw_audio = raw_audio.astype(np.float32)
+                input_names = (
+                    [inp.name for inp in self.tts_session.get_inputs()]
+                    if hasattr(self.tts_session, "get_inputs")
+                    else ["text"]
+                )
+                if "input" in input_names and self._phoneme_id_map:
+                    phoneme_ids = self._text_to_phoneme_ids(clause_text)
+                    ort_inputs: dict[str, Any] = {
+                        "input": phoneme_ids,
+                        "input_lengths": np.array([phoneme_ids.shape[1]], dtype=np.int64),
+                        "scales": self._inference_scales,
+                    }
+                    if "sid" in input_names:
+                        ort_inputs["sid"] = np.array([0], dtype=np.int64)
+                    outputs = self.tts_session.run(None, ort_inputs)
+                else:
+                    # Tương thích ngược với session nhận chuỗi văn bản trực tiếp
+                    inputs = {"text": np.array([[clause_text]], dtype=object)}
+                    outputs = self.tts_session.run(None, inputs)
+
+                raw_audio = np.asarray(outputs[0], dtype=np.float32).squeeze()
+                if raw_audio.ndim == 0:
+                    raw_audio = raw_audio.reshape(1)
+
+                # Nội suy tần số lấy mẫu từ Native SR (22,050 Hz) lên chuẩn Studio/WebRTC 24,000 Hz
+                if self._model_sample_rate != self.SAMPLE_RATE and len(raw_audio) > 1:
+                    target_len = round(len(raw_audio) * (self.SAMPLE_RATE / float(self._model_sample_rate)))
+                    x_old = np.linspace(0.0, 1.0, len(raw_audio), endpoint=False, dtype=np.float32)
+                    x_new = np.linspace(0.0, 1.0, target_len, endpoint=False, dtype=np.float32)
+                    raw_audio = np.interp(x_new, x_old, raw_audio).astype(np.float32)
+
                 # Chuẩn hóa biên độ [-1.0, 1.0]
                 max_val = float(np.max(np.abs(raw_audio))) if len(raw_audio) > 0 else 1.0
                 if max_val > 1.0:
@@ -309,7 +481,7 @@ class Module7MultimodalOutputGenerator:
     async def start_websocket_server(self) -> None:
         """Khởi động WebSocket server để stream output trực tiếp đến Web Client."""
         try:
-            import websockets  # type: ignore
+            websockets: Any = importlib.import_module("websockets")
 
             host = getattr(settings, "WEBSOCKET_HOST", "0.0.0.0")
             port = getattr(settings, "WEBSOCKET_PORT", 8765)
@@ -348,10 +520,11 @@ class Module7MultimodalOutputGenerator:
     # ------------------------------------------------------------------
     async def _on_brain_response(self, payload: BrainResponsePayload) -> None:
         """Tiếp nhận BrainResponsePayload từ Module 6 và phát sóng đa phương thức."""
-        action_obj = None
+        action_obj: dict[str, Any] | None = None
         if payload.action:
             try:
-                action_obj = json.loads(payload.action) if isinstance(payload.action, str) else payload.action
+                parsed: Any = json.loads(payload.action) if isinstance(payload.action, str) else payload.action
+                action_obj = parsed if isinstance(parsed, dict) else {"raw_action": payload.action}
             except Exception:
                 action_obj = {"raw_action": payload.action}
 
@@ -372,8 +545,23 @@ class Module7MultimodalOutputGenerator:
             # 2. Phản hồi hoàn chỉnh: Định dạng Markdown và tổng hợp TTS
             formatted_chat = self.format_chat_text(payload.text, action_payload=action_obj)
 
-            # Tổng hợp âm thanh toàn bài
+            # Tổng hợp âm thanh toàn bài (Tự động chuyển đổi JSON Action sang câu thông báo giọng nói tự nhiên)
             normalized_text = self._normalize_vietnamese_text(payload.text)
+            if (not normalized_text or normalized_text.startswith("{")) and isinstance(action_obj, dict):
+                act_name: Any = action_obj.get("name", "")
+                raw_args: Any = action_obj.get("arguments")
+                act_args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
+                if act_name == "create_jira_task":
+                    task = act_args.get("task_title", "công việc")
+                    assignee = act_args.get("assignee", "thành viên")
+                    normalized_text = self._normalize_vietnamese_text(
+                        f"Đã ghi nhận nhiệm vụ {task} cho {assignee}."
+                    )
+                elif act_name == "schedule_meeting":
+                    title = act_args.get("meeting_title", "cuộc họp")
+                    normalized_text = self._normalize_vietnamese_text(f"Đã đặt lịch {title}.")
+                elif not normalized_text:
+                    normalized_text = "Đã hoàn tất xử lý yêu cầu."
             pcm_audio = self._synthesize_clause_to_pcm(normalized_text)
             audio_bytes = (pcm_audio * 32767.0).astype(np.int16).tobytes() if len(pcm_audio) > 0 else b""
 

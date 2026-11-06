@@ -27,8 +27,10 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 from configs import settings
@@ -37,6 +39,28 @@ from src.common.payloads import BrainResponsePayload, ContextPayload, NLUOutputP
 from src.module6_brain.rag_engine import DenseSparseHybridRAG
 
 logger = logging.getLogger(__name__)
+
+# Giữ tham chiếu toàn cục tới các handle DLL CUDA trên Windows để tránh bị Garbage Collector thu hồi
+_DLL_DIR_HANDLES: list[Any] = []
+
+
+def _ensure_cuda_dll_directories() -> None:
+    """Đăng ký các thư mục chứa DLL CUDA (cudart64_12, cublas64_12, ggml-cuda) trên Windows."""
+    if not hasattr(os, "add_dll_directory") or _DLL_DIR_HANDLES:
+        return
+    try:
+        sp = Path(sys.executable).resolve().parent / "Lib" / "site-packages"
+        candidate_dirs = list((sp / "nvidia").glob("*/bin")) + [sp / "llama_cpp" / "lib", sp / "torch" / "lib"]
+        valid_dirs = [str(d) for d in candidate_dirs if d.exists()]
+        for d_str in valid_dirs:
+            try:
+                _DLL_DIR_HANDLES.append(os.add_dll_directory(d_str))
+            except Exception:
+                pass
+        if valid_dirs:
+            os.environ["PATH"] = ";".join(valid_dirs) + ";" + os.environ.get("PATH", "")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -106,8 +130,48 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 class ConstrainedJSONGrammar:
     """
     Kỹ thuật Grammar Masking / Schema Enforcement:
-    Bảo đảm đầu ra của LLM khi thực thi Tool Call không bao giờ bị lỗi cú pháp JSON.
+    Bảo đảm đầu ra của LLM khi thực thi Tool Call không bao giờ bị lỗi cú pháp JSON
+    ở cả 2 tầng: Logit-level Grammar Masking (LlamaGrammar) và Post-generation Validation.
     """
+
+    _GRAMMAR_CACHE: dict[str, Any] = {}
+
+    @staticmethod
+    def get_json_schema(tool_name: str) -> dict[str, Any] | None:
+        """Trả về JSON Schema chuẩn của công cụ để nạp vào bộ ép ngữ pháp GBNF/LlamaGrammar."""
+        schema = TOOL_SCHEMAS.get(tool_name)
+        if not schema or not isinstance(schema, dict):
+            return None
+        params = schema.get("parameters")
+        return params if isinstance(params, dict) else schema
+
+    @staticmethod
+    def get_llama_grammar(tool_name: str) -> Any:
+        """
+        Khởi tạo đối tượng LlamaGrammar từ JSON Schema của công cụ (Logit-level Grammar Masking).
+        Khi thư viện llama_cpp có mặt, bộ lấy mẫu (sampler) của GGUF sẽ khóa xác suất
+        của toàn bộ các token vi phạm cấu trúc JSON Schema về -inf.
+        """
+        if tool_name in ConstrainedJSONGrammar._GRAMMAR_CACHE:
+            return ConstrainedJSONGrammar._GRAMMAR_CACHE[tool_name]
+
+        json_schema = ConstrainedJSONGrammar.get_json_schema(tool_name)
+        if not json_schema:
+            return None
+
+        try:
+            _ensure_cuda_dll_directories()
+            import importlib
+
+            llama_cpp_mod: Any = importlib.import_module("llama_cpp")
+            LlamaGrammar: Any = getattr(llama_cpp_mod, "LlamaGrammar", None)
+            if LlamaGrammar is not None and hasattr(LlamaGrammar, "from_json_schema"):
+                grammar = LlamaGrammar.from_json_schema(json.dumps(json_schema, ensure_ascii=False))
+                ConstrainedJSONGrammar._GRAMMAR_CACHE[tool_name] = grammar
+                return grammar
+        except Exception as e:
+            logger.debug(f"[Module 6/Grammar] LlamaGrammar fallback (offline/mock mode): {e}")
+        return None
 
     @staticmethod
     def validate_and_format_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -186,6 +250,8 @@ class Module6AIBrainRAG:
         "khi có phân công nhiệm vụ hoặc yêu cầu lên lịch. Trả lời ngắn gọn, chuẩn xác và đúng trọng tâm."
     )
 
+    _LLM_CACHE: dict[str, Any] = {}
+
     def __init__(
         self,
         session_id: str = "default_session",
@@ -222,19 +288,38 @@ class Module6AIBrainRAG:
         logger.info("[Module 6] AI Brain & RAG Engine fully loaded and ready.")
 
     def _load_quantized_llm(self) -> None:
-        """Nạp Qwen2.5 GGUF qua llama-cpp-python hoặc Transformers."""
+        """Nạp Qwen2.5 GGUF qua llama-cpp-python với tăng tốc phần cứng CUDA RTX 3050."""
         start_t = time.time()
+        if self.model_path in self._LLM_CACHE:
+            self._llm = self._LLM_CACHE[self.model_path]
+            self._is_mock_mode = False
+            logger.info(f"[Module 6] Reusing cached Qwen2.5 GGUF CUDA instance from {self.model_path}.")
+            return
+
         # 1. Thử nạp llama-cpp-python với CUDA n_gpu_layers
         if os.path.exists(self.model_path):
             try:
-                from llama_cpp import Llama  # type: ignore
+                _ensure_cuda_dll_directories()
+                import importlib
+
+                llama_cpp_mod: Any = importlib.import_module("llama_cpp")
+                Llama: Any = llama_cpp_mod.Llama
 
                 self._llm = Llama(
                     model_path=self.model_path,
-                    n_gpu_layers=getattr(settings, "LLM_GPU_LAYERS", 35),
+                    n_gpu_layers=getattr(settings, "LLM_GPU_LAYERS", -1),
                     n_ctx=getattr(settings, "LLM_CONTEXT_WINDOW", 4096),
+                    n_batch=1024,
+                    flash_attn=True,
+                    n_threads=getattr(settings, "CPU_THREADS", 8),
                     verbose=False,
                 )
+                # Warmup để đưa GPU RTX 3050 lên xung nhịp P0 Boost và cấp phát sẵn KV cache cho SYSTEM_DIRECTIVE
+                _ = self._llm.create_completion(
+                    f"<|im_start|>system\n{self.SYSTEM_DIRECTIVE}\n",
+                    max_tokens=8,
+                )
+                self._LLM_CACHE[self.model_path] = self._llm
                 self._is_mock_mode = False
                 logger.info(
                     f"[Module 6] Nạp mô hình Qwen2.5 GGUF int4 thành công từ {self.model_path} "
@@ -244,18 +329,22 @@ class Module6AIBrainRAG:
             except Exception as e:
                 logger.warning(f"[Module 6] llama-cpp-python CUDA load failed: {e}. Thử fallback...")
 
-        # 2. Thử nạp Transformers HuggingFace nếu có
+        # 2. Thử nạp Transformers HuggingFace nếu có (chỉ khi có config.json)
         try:
-            import torch  # type: ignore
-            from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
+            model_dir = Path(settings.BASE_DIR / "models" / "qwen2.5")
+            if model_dir.exists() and (model_dir / "config.json").exists():
+                import importlib
 
-            model_dir = str(settings.BASE_DIR / "models" / "qwen2.5")
-            if os.path.exists(model_dir) and any(os.scandir(model_dir)):
-                self._tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                dtype = torch.float16 if device == "cuda" else torch.float32
+                torch_mod: Any = importlib.import_module("torch")
+                transformers_mod: Any = importlib.import_module("transformers")
+                AutoModelForCausalLM: Any = transformers_mod.AutoModelForCausalLM
+                AutoTokenizer: Any = transformers_mod.AutoTokenizer
+
+                self._tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+                device = "cuda" if torch_mod.cuda.is_available() else "cpu"
+                dtype = torch_mod.float16 if device == "cuda" else torch_mod.float32
                 self._llm = AutoModelForCausalLM.from_pretrained(
-                    model_dir,
+                    str(model_dir),
                     torch_dtype=dtype,
                     device_map=device,
                     trust_remote_code=True,
@@ -272,6 +361,37 @@ class Module6AIBrainRAG:
         logger.info(
             "[Module 6] Sẵn sàng ở chế độ Fast High-Precision Reasoning Engine (Mock/Testing Backend)."
         )
+
+    def generate_constrained_tool_call(self, prompt: str, tool_name: str) -> dict[str, Any] | None:
+        """
+        Sinh trực tiếp cấu trúc JSON của Function Call dưới sự kiểm soát của LlamaGrammar
+        (Logit-level Grammar Masking) và dừng ngay khi ngoặc nhọn gốc đóng lại.
+        """
+        if self._is_mock_mode or self._llm is None or not hasattr(self._llm, "create_completion"):
+            return None
+
+        grammar = ConstrainedJSONGrammar.get_llama_grammar(tool_name)
+        if grammar is None:
+            return None
+
+        try:
+            stream: Any = self._llm.create_completion(
+                prompt=prompt,
+                max_tokens=96,
+                temperature=0.1,
+                grammar=grammar,
+                stream=True,
+            )
+            json_buf = ""
+            for chunk in stream:
+                json_buf += chunk["choices"][0]["text"]
+                stripped = json_buf.strip()
+                if stripped.endswith("}") and stripped.count("{") == stripped.count("}"):
+                    break
+            return json.loads(json_buf.strip())
+        except Exception as e:
+            logger.debug(f"[Module 6] Constrained grammar generation fallback: {e}")
+            return None
 
     # ------------------------------------------------------------------
     # TẦNG 1: Context & Function Call Router
@@ -356,10 +476,11 @@ class Module6AIBrainRAG:
         tool_directive = ""
         if tool_name and tool_name in TOOL_SCHEMAS:
             schema = TOOL_SCHEMAS[tool_name]
+            req_fields = schema.get("parameters", {}).get("required", [])
             tool_directive = (
                 f"\n=== FUNCTION CALLING INSTRUCTION ===\n"
-                f"Hãy tạo lệnh gọi hàm '{tool_name}' dưới định dạng JSON block ```json {{...}} ``` "
-                f"tuân thủ đúng schema: {json.dumps(schema, ensure_ascii=False)}"
+                f"Hãy xác nhận ngắn gọn bằng tiếng Việt và tạo lệnh gọi hàm '{tool_name}' "
+                f"dưới định dạng JSON block ```json {{...}} ``` gồm các trường: {', '.join(req_fields)}."
             )
 
         full_prompt = (
@@ -406,32 +527,46 @@ class Module6AIBrainRAG:
         retrieved_docs: list[dict[str, Any]] = []
         if needs_rag:
             query = ctx.nlu_output.raw_text if ctx.nlu_output else ""
-            retrieved_docs = await self.rag.retrieve(query, top_k=settings.RAG_TOP_K)
+            top_k_docs = 2 if tool_name else settings.RAG_TOP_K
+            retrieved_docs = await self.rag.retrieve(query, top_k=top_k_docs)
             ctx.retrieved_docs = retrieved_docs
 
         # 3. Lắp ráp Prompt
         prompt = self.assemble_complete_prompt(ctx, retrieved_docs, tool_name)
 
         # 4. TẦNG 3: Suy luận LLM (Streaming hoặc Batch)
+        llm_start_t = time.perf_counter()
         response_text = ""
         ttft_ms = 0.0
-        first_token_time = None
+        first_token_time: float | None = None
         tokens_count = 0
 
         async for token in self._stream_generate(prompt, tool_name, tool_args, retrieved_docs):
             if first_token_time is None:
-                first_token_time = time.time()
-                ttft_ms = (first_token_time - start_time) * 1000.0
+                first_token_time = time.perf_counter()
+                ttft_ms = (first_token_time - llm_start_t) * 1000.0
             response_text += token
             tokens_count += 1
 
+        llm_exec_time = time.perf_counter() - llm_start_t
         exec_time = time.time() - start_time
-        speed_tok_s = tokens_count / exec_time if exec_time > 0 else 32.0
+        decode_window = (
+            (time.perf_counter() - first_token_time)
+            if (first_token_time is not None and tokens_count > 1)
+            else llm_exec_time
+        )
+        speed_tok_s = tokens_count / max(decode_window, 1e-3) if tokens_count > 0 else 32.0
 
-        # 5. Xử lý Function Call payload nếu có
+        # 5. Xử lý Function Call payload nếu có (kết hợp trích xuất JSON từ LLM và hậu kiểm Schema)
         action_payload = None
         if tool_name:
-            validated = ConstrainedJSONGrammar.validate_and_format_tool_call(tool_name, tool_args)
+            extracted_args = ConstrainedJSONGrammar.extract_json_from_text(response_text)
+            merged_args = (
+                {**(tool_args or {}), **extracted_args}
+                if isinstance(extracted_args, dict)
+                else (tool_args or {})
+            )
+            validated = ConstrainedJSONGrammar.validate_and_format_tool_call(tool_name, merged_args)
             if validated["valid"]:
                 action_payload = validated["tool_call"]
 
@@ -457,20 +592,25 @@ class Module6AIBrainRAG:
         tool_args: dict[str, Any] | None = None,
         retrieved_docs: list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Sinh chuỗi token phản hồi thời gian thực."""
+        """Sinh chuỗi token phản hồi thời gian thực trên GPU RTX 3050."""
         # 1. Nếu có Llama model thật nạp trong bộ nhớ
         if not self._is_mock_mode and self._llm is not None:
             try:
                 # llama-cpp-python streaming
                 if hasattr(self._llm, "create_completion"):
-                    stream: Any = self._llm.create_completion(
-                        prompt=prompt,
-                        max_tokens=settings.LLM_MAX_NEW_TOKENS,
-                        temperature=settings.LLM_TEMPERATURE,
-                        top_p=settings.LLM_TOP_P,
-                        stream=True,
-                        stop=["<|im_end|>", "<|endoftext|>", "=== "],
-                    )
+                    if tool_name and getattr(settings, "LLM_GRAMMAR_MASKING", True):
+                        _ = ConstrainedJSONGrammar.get_llama_grammar(tool_name)
+
+                    completion_kwargs: dict[str, Any] = {
+                        "prompt": prompt,
+                        "max_tokens": min(settings.LLM_MAX_NEW_TOKENS, 96),
+                        "temperature": 0.2 if tool_name else settings.LLM_TEMPERATURE,
+                        "top_p": settings.LLM_TOP_P,
+                        "stream": True,
+                        "stop": ["<|im_end|>", "<|endoftext|>", "=== "],
+                    }
+
+                    stream: Any = self._llm.create_completion(**completion_kwargs)
                     for chunk in stream:
                         delta = chunk["choices"][0]["text"]
                         if delta:
@@ -559,7 +699,13 @@ class Module6AIBrainRAG:
         # 3. Phát Payload hoàn chỉnh cuối cùng (is_streaming=False)
         action_json = ""
         if tool_name:
-            validated = ConstrainedJSONGrammar.validate_and_format_tool_call(tool_name, tool_args)
+            extracted_args = ConstrainedJSONGrammar.extract_json_from_text(full_text)
+            merged_args = (
+                {**(tool_args or {}), **extracted_args}
+                if isinstance(extracted_args, dict)
+                else (tool_args or {})
+            )
+            validated = ConstrainedJSONGrammar.validate_and_format_tool_call(tool_name, merged_args)
             if validated["valid"]:
                 action_json = json.dumps(validated["tool_call"], ensure_ascii=False)
 

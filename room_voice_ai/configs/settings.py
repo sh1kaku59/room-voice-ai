@@ -43,7 +43,7 @@ HPF_CUTOFF_HZ          = 80.0    # High-pass filter cutoff (Hz)
 # Module 2 – Wake-word Detector (CPU, ONNX int8, <3.5ms/frame)
 # Đặc tả: blueprint Mục 6, TPR ≥ 96.2%, FAR < 0.5/h
 # ---------------------------------------------------------------------------
-WAKEWORD_MODEL_PATH    = str(BASE_DIR / "models" / "openwakeword" / "hey_room.onnx")
+WAKEWORD_MODEL_PATH    = str(BASE_DIR / "models" / "ai_star_light_openwakeword.onnx")
 WAKEWORD_THRESHOLD     = 0.75    # θ_wake ≥ 0.75 theo blueprint Mục 4.1
 WAKEWORD_COOLDOWN_S    = 2.0     # Refractory Cooldown Lockout sau kích hoạt (giây)
 WAKEWORD_HYSTERESIS_MS = 300     # Cửa sổ làm mượt Hysteresis (ms)
@@ -54,7 +54,7 @@ WAKEWORD_HYSTERESIS_MS = 300     # Cửa sổ làm mượt Hysteresis (ms)
 # Đặc tả: blueprint Mục 6 – WER ≤ 9.5%, VRAM ~850-950 MB
 # ---------------------------------------------------------------------------
 ASR_MODEL_SIZE         = "small"      # PhoWhisper-small (không dùng large-v3 – quá VRAM)
-ASR_MODEL_PATH         = str(BASE_DIR / "models" / "faster_whisper" / "phowhisper-small")
+ASR_MODEL_PATH         = str(BASE_DIR / "models" / "phowhisper-small-ct2")
 ASR_LANGUAGE           = "vi"         # Tiếng Việt
 ASR_COMPUTE_TYPE       = "int8_float16"  # CTranslate2 tối ưu CUDA Tensor Cores
 ASR_BEAM_SIZE          = 5
@@ -64,7 +64,7 @@ ASR_CHUNK_LENGTH_S     = 30           # Độ dài tối đa mỗi đoạn (giâ
 # ---------------------------------------------------------------------------
 # Module 4 – NLU (PhoBERT-Joint ONNX)
 # ---------------------------------------------------------------------------
-NLU_MODEL_PATH         = str(BASE_DIR / "models" / "phobert_nlu" / "model.onnx")
+NLU_MODEL_PATH         = str(BASE_DIR / "models" / "phobert_joint_meeting_nlu.onnx")
 NLU_TOKENIZER_PATH     = str(BASE_DIR / "models" / "phobert_nlu" / "tokenizer")
 NLU_INTENT_THRESHOLD   = 0.6    # Ngưỡng tin cậy nhận dạng intent
 NLU_ENTITY_THRESHOLD   = 0.5    # Ngưỡng tin cậy nhận dạng entity

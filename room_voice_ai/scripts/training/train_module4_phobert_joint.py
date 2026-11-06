@@ -288,9 +288,11 @@ def build_joint_model(num_intents: int = 6, num_slots: int = 11):
       - Intent Head: Linear(768, 6) + Softmax trên [CLS]
       - Slot Head: Linear(768, 11) BIO sequence tagger
     """
-    import torch
+    import transformers as _transformers
     from torch import nn
-    from transformers import AutoModel
+
+    transformers_mod: Any = _transformers
+    AutoModel: Any = transformers_mod.AutoModel
 
     class PhoBERTJointModel(nn.Module):
         """PhoBERT-base-v2 + Dual Task Heads cho Joint NLU."""
@@ -315,9 +317,9 @@ def build_joint_model(num_intents: int = 6, num_slots: int = 11):
 
         def forward(
             self,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-            token_type_ids: torch.Tensor | None = None,
+            input_ids: Any,
+            attention_mask: Any,
+            token_type_ids: Any | None = None,
         ):
             outputs = self.bert(
                 input_ids=input_ids,
@@ -345,8 +347,9 @@ def collate_batch(
     max_length: int = 64,
 ) -> dict:
     """Tạo batch tensors từ list samples."""
-    import torch
+    import torch as _torch
 
+    torch: Any = _torch
     all_input_ids    = []
     all_attn_mask    = []
     all_intent_ids   = []
@@ -402,11 +405,14 @@ def train_joint_model(
     Fine-tune PhoBERT-Joint với Joint Multi-Task Loss.
     L_joint = α * L_intent + (1-α) * L_slot   (α=0.5 theo spec)
     """
-    import torch
+    import torch as _torch
+    import transformers as _transformers
     from torch import nn
     from torch.optim import AdamW
-    from transformers import AutoTokenizer
 
+    torch: Any = _torch
+    transformers_mod: Any = _transformers
+    AutoTokenizer: Any = transformers_mod.AutoTokenizer
     device = torch.device("cpu")  # CPU-only theo spec Module 4
     logger.info(f"[Train] Device: {device}")
 
@@ -520,8 +526,9 @@ def train_joint_model(
 
 def export_to_onnx(model, tokenizer, onnx_path: Path):
     """Export PyTorch model → ONNX."""
-    import torch
+    import torch as _torch
 
+    torch: Any = _torch
     model.eval()
     ONNX_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -554,7 +561,7 @@ def export_to_onnx(model, tokenizer, onnx_path: Path):
 
 def quantize_onnx_int8(onnx_fp32: Path, onnx_int8: Path):
     """Quantize ONNX float32 → int8 (~115MB target)."""
-    from onnxruntime.quantization import QuantType, quantize_dynamic
+    from onnxruntime.quantization import QuantType, quantize_dynamic  # type: ignore
 
     logger.info(f"[ONNX-INT8] Quantizing {onnx_fp32.name} → {onnx_int8.name} ...")
     quantize_dynamic(
@@ -572,7 +579,7 @@ def quantize_onnx_int8(onnx_fp32: Path, onnx_int8: Path):
 
 def validate_onnx_inference(onnx_path: Path, tokenizer):
     """Kiểm tra ONNX inference latency và output correctness."""
-    import onnxruntime as ort
+    import onnxruntime as ort  # type: ignore
 
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = 2
@@ -668,12 +675,16 @@ def main():
     if CHECKPOINT.exists() and TOKENIZER_DIR.exists():
         logger.info(f"\n[Step 2] ✅ Đã tìm thấy checkpoint đã train hoàn tất 10 epochs → {CHECKPOINT}")
         logger.info("  Nạp checkpoint và tokenizer để tiến hành Export ONNX...")
-        import torch
-        from transformers import AutoTokenizer
+        import torch as _torch
+        import transformers as _transformers
+
+        torch_mod: Any = _torch
+        transformers_mod: Any = _transformers
+        AutoTokenizer: Any = transformers_mod.AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(str(TOKENIZER_DIR), use_fast=False)
         PhoBERTJoint = build_joint_model(num_intents=len(INTENT_LABELS), num_slots=len(SLOT_LABELS))
         model = PhoBERTJoint(model_name="vinai/phobert-base-v2", num_intents=len(INTENT_LABELS), num_slots=len(SLOT_LABELS))
-        model.load_state_dict(torch.load(CHECKPOINT, map_location="cpu"))
+        model.load_state_dict(torch_mod.load(CHECKPOINT, map_location="cpu"))
     else:
         logger.info("\n[Step 2] Fine-tuning PhoBERT-Joint (CPU, 10 epochs)...")
         logger.info("  Base model: vinai/phobert-base-v2 (downloading from HuggingFace...)")

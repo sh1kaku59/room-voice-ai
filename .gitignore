@@ -41,6 +41,7 @@ room_voice_ai/models/phobert_nlu/*.pt
 room_voice_ai/models/phobert_nlu/*.onnx
 room_voice_ai/models/phobert_nlu/*.data
 room_voice_ai/models/phowhisper-small-ct2/*.bin
+room_voice_ai/models/kokoro_tts/*.onnx
 
 # 6. Database, Raw training cache & Runtime logs
 *.db

@@ -34,10 +34,13 @@ class Module3VietnameseStreamingASR:
     MIN_BUFFER_SEC: float = 0.5
     # Kích thước buffer tối đa (giây) – force transcribe
     MAX_BUFFER_SEC: float = 10.0
+    # Số frame khoảng lặng liên tiếp sau khi đã có tiếng nói để tự động chốt câu
+    # (12 frames x 32ms = 384ms sau 256ms Hangover của Module 1 => ~0.64s im lặng tự nhiên)
+    END_OF_SPEECH_SILENCE_FRAMES: int = 12
 
     def __init__(
         self,
-        model_path: str = "vinai/PhoWhisper-small",
+        model_path: str = settings.ASR_MODEL_PATH if hasattr(settings, "ASR_MODEL_PATH") else "vinai/PhoWhisper-small",
         device: str = "cuda",
         compute_type: str = "float16",
         beam_size: int = 1,
@@ -59,13 +62,15 @@ class Module3VietnameseStreamingASR:
         self.committed_text: str = ""
         self.unconfirmed_text: str = ""
 
-        # Trạng thái lắng nghe của pipeline
+        # Trạng thái lắng nghe và phát hiện kết thúc câu nói (End-of-Speech)
         self._listening: bool = False
+        self._has_spoken_in_turn: bool = False
+        self._silence_frames_after_speech: int = 0
         self._audio_buffer: list[np.ndarray] = []
         self._confirmed_prefix: str = ""
 
         # Mô phỏng nạp mô hình trong khối chạy thử, thực tế nạp model từ faster-whisper
-        self.model: Any | None = None
+        self.model: Any = None
         self.model_path = model_path
         if model_path:
             self._init_model_engine(model_path)
@@ -99,9 +104,10 @@ class Module3VietnameseStreamingASR:
             # Tự động nạp CUDA DLLs từ torch/lib nếu chạy trên Windows + CUDA
             if self.device == "cuda" and hasattr(os, "add_dll_directory"):
                 try:
-                    import torch  # type: ignore
+                    import importlib
 
-                    torch_file = getattr(torch, "__file__", None)
+                    torch_mod: Any = importlib.import_module("torch")
+                    torch_file = getattr(torch_mod, "__file__", None)
                     if torch_file:
                         torch_lib = os.path.join(os.path.dirname(torch_file), "lib")
                         if os.path.exists(torch_lib):
@@ -115,7 +121,10 @@ class Module3VietnameseStreamingASR:
             if local_model_path.exists() and (local_model_path / "model.bin").exists():
                 model_path = str(local_model_path)
 
-            from faster_whisper import WhisperModel  # type: ignore
+            import importlib
+
+            fw_mod: Any = importlib.import_module("faster_whisper")
+            WhisperModel: Any = fw_mod.WhisperModel
 
             logger.info(f"[Module 3] Đang nạp PhoWhisper từ {model_path} trên {self.device} ({self.compute_type})...")
             self.model = WhisperModel(
@@ -243,19 +252,27 @@ class Module3VietnameseStreamingASR:
     # ------------------------------------------------------------------
     # EventBus integration
     # ------------------------------------------------------------------
-    async def _on_wake_word(self, _payload: WakeWordPayload | None = None) -> None:
-        """Bật chế độ lắng nghe khi phát hiện wake-word."""
+    def start_listening(self) -> None:
+        """Kích hoạt trạng thái lắng nghe cho lượt hội thoại mới và đặt lại bộ đếm khoảng lặng."""
         self._listening = True
+        self._has_spoken_in_turn = False
+        self._silence_frames_after_speech = 0
         self._audio_buffer.clear()
         self._confirmed_prefix = ""
         self.context_buffer = np.array([], dtype=np.float32)
         self.committed_text = ""
         self.unconfirmed_text = ""
+
+    async def _on_wake_word(self, _payload: WakeWordPayload | None = None) -> None:
+        """Bật chế độ lắng nghe khi phát hiện wake-word."""
+        self.start_listening()
         logger.info("[Module 3] 👂 Listening started.")
 
     async def _on_reset(self, _payload: object | None = None) -> None:
         """Reset trạng thái về idle."""
         self._listening = False
+        self._has_spoken_in_turn = False
+        self._silence_frames_after_speech = 0
         self._audio_buffer.clear()
         self._confirmed_prefix = ""
         self.context_buffer = np.array([], dtype=np.float32)
@@ -264,9 +281,26 @@ class Module3VietnameseStreamingASR:
         logger.info("[Module 3] Reset to idle.")
 
     async def _on_audio_chunk(self, payload: AudioChunkPayload) -> None:
-        """Tích lũy chunk và kích hoạt transcription."""
-        if not self._listening or not payload.is_speech:
+        """Tích lũy chunk âm thanh và tự động kích hoạt End-of-Speech Finalization khi hết câu."""
+        if not self._listening:
             return
+
+        if not payload.is_speech:
+            # Nếu người dùng đã bắt đầu nói trong lượt này và xuất hiện khoảng lặng liên tiếp
+            # (sau khi đã qua 256ms Hangover của Module 1)
+            if self._has_spoken_in_turn:
+                self._silence_frames_after_speech += 1
+                if self._silence_frames_after_speech >= self.END_OF_SPEECH_SILENCE_FRAMES:
+                    logger.info(
+                        f"[Module 3] Phát hiện kết thúc câu nói sau {self._silence_frames_after_speech} "
+                        "frame khoảng lặng -> Tự động finalize()."
+                    )
+                    await self.finalize()
+            return
+
+        # Khi có tiếng nói (is_speech=True): đánh dấu đã phát âm và reset bộ đếm khoảng lặng
+        self._has_spoken_in_turn = True
+        self._silence_frames_after_speech = 0
 
         chunk_np = np.frombuffer(payload.audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         self._audio_buffer.append(chunk_np)
@@ -279,17 +313,34 @@ class Module3VietnameseStreamingASR:
 
     async def _transcribe(self, is_final: bool = False) -> None:
         """Chạy inference và phát TranscriptPayload lên EventBus."""
-        if not self._audio_buffer:
+        if self._audio_buffer:
+            audio_np = np.concatenate(self._audio_buffer)
+            self._audio_buffer.clear()
+            committed, hyp = await asyncio.get_event_loop().run_in_executor(
+                None, self.transcribe_streaming_chunk, audio_np, is_final
+            )
+            display_text = hyp if hyp else committed
+        elif is_final and (self.committed_text or self.unconfirmed_text):
+            # Trường hợp _audio_buffer vừa được giải mã ở bước partial ngay trước khi người nói dừng lại
+            raw_final = ((self.committed_text + " ") if self.committed_text else "") + self.unconfirmed_text
+            display_text = self.normalize_vietnamese_text(self.apply_code_switching(raw_final))
+            self.committed_text = ""
+            self.unconfirmed_text = ""
+            self.context_buffer = np.array([], dtype=np.float32)
+        elif is_final and len(self.context_buffer) > 0:
+            audio_np = np.array([], dtype=np.float32)
+            committed, hyp = await asyncio.get_event_loop().run_in_executor(
+                None, self.transcribe_streaming_chunk, audio_np, True
+            )
+            display_text = hyp if hyp else committed
+        else:
             return
 
-        audio_np = np.concatenate(self._audio_buffer)
-        self._audio_buffer.clear()
+        if is_final:
+            self._listening = False
+            self._has_spoken_in_turn = False
+            self._silence_frames_after_speech = 0
 
-        committed, hyp = await asyncio.get_event_loop().run_in_executor(
-            None, self.transcribe_streaming_chunk, audio_np, is_final
-        )
-
-        display_text = hyp if hyp else committed
         if not display_text.strip():
             return
 
@@ -312,9 +363,16 @@ class Module3VietnameseStreamingASR:
 
     async def finalize(self) -> None:
         """Ép transcribe toàn bộ buffer còn lại và đánh dấu is_final=True."""
-        if self._listening and (len(self._audio_buffer) > 0 or len(self.context_buffer) > 0):
+        if self._listening and (
+            len(self._audio_buffer) > 0
+            or len(self.context_buffer) > 0
+            or bool(self.committed_text)
+            or bool(self.unconfirmed_text)
+        ):
             await self._transcribe(is_final=True)
         self._listening = False
+        self._has_spoken_in_turn = False
+        self._silence_frames_after_speech = 0
 
 
 # Alias tương thích ngược với hệ thống
