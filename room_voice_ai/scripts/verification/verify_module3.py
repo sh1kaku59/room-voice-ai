@@ -94,7 +94,7 @@ def run_verification():
 
     # 6. FINALIZATION FLUSH
     print("\n[6] SPEECH FINALIZATION FLUSH CHECK:")
-    final_comm, final_hyp = asr.transcribe_streaming_chunk(audio_1s[:8000], is_speech_final=True)
+    _final_comm, final_hyp = asr.transcribe_streaming_chunk(audio_1s[:8000], is_speech_final=True)
     print(f"  Final transcript: '{final_hyp}'")
     print(f"  Context buffer after finalization: {len(asr.context_buffer)} samples (expect 0)")
     assert len(asr.context_buffer) == 0

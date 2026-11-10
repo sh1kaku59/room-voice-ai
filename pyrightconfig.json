@@ -4,16 +4,13 @@
   ],
   "exclude": [
     "**/__pycache__",
-    "**/__pyrefly_virtual__",
-    "**/.venv"
+    "**/__pyrefly_virtual__"
   ],
   "extraPaths": [
     "./room_voice_ai",
     "./room_voice_ai/src",
-    "./.venv/Lib/site-packages"
+    "C:/Users/wanbi/AppData/Local/Programs/Python/Python312/Lib/site-packages"
   ],
-  "venvPath": ".",
-  "venv": ".venv",
   "reportMissingImports": "none",
   "pythonVersion": "3.12"
 }

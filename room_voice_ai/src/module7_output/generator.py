@@ -610,15 +610,6 @@ class Module7MultimodalOutputGenerator:
             await self._broadcast(msg)
             await asyncio.sleep(0.005)
 
-    async def _synthesize_tts(self, text: str) -> bytes:
-        """Alias tương thích cho các unit test cũ."""
-        if not text.strip():
-            return b""
-        if self._is_mock_tts and self.tts_session is None:
-            return b""
-        pcm = self._synthesize_clause_to_pcm(text)
-        return (pcm * 32767.0).astype(np.int16).tobytes()
-
 
 # ---------------------------------------------------------------------------
 # Alias tương thích hoàn toàn cho OutputGenerator

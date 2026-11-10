@@ -408,7 +408,7 @@ class Module4MeetingNLU:
     # ------------------------------------------------------------------
     # Tầng 2: Joint Neural Inference & BIO Slot Decoding
     # ------------------------------------------------------------------
-    def _compute_linguistic_intent_prior(self, raw_transcript: str, segmented_words: list[str]) -> np.ndarray:
+    def _compute_linguistic_intent_prior(self, raw_transcript: str) -> np.ndarray:
         """
         Tính vector prior ngữ nghĩa phòng họp để hậu kiểm và củng cố logits của PhoBERT.
         Thứ tự nhãn:
@@ -443,7 +443,6 @@ class Module4MeetingNLU:
 
     def _decode_bio_slots(
         self,
-        input_ids: np.ndarray,
         slot_logits: np.ndarray,
         segmented_words: list[str],
         raw_transcript: str = "",
@@ -694,7 +693,7 @@ class Module4MeetingNLU:
             intent_logits = np.asarray(raw_outputs[0], dtype=np.float64)
             slot_logits = np.asarray(raw_outputs[1], dtype=np.float64)
 
-        linguistic_prior = self._compute_linguistic_intent_prior(raw_transcript, segmented_words)
+        linguistic_prior = self._compute_linguistic_intent_prior(raw_transcript)
 
         if intent_logits is not None and not self._is_mock_session:
             # Kết hợp logits nơ-ron từ PhoBERT-Joint ONNX (được hiệu chuẩn nhiệt độ) với prior ngữ nghĩa
@@ -717,7 +716,7 @@ class Module4MeetingNLU:
 
         # TẦNG 3: Giải mã chuỗi BIO từ slot_logits + Tinh chỉnh & Chuẩn hóa ISO-8601
         neural_slots = (
-            self._decode_bio_slots(input_ids, slot_logits, segmented_words, raw_transcript=raw_transcript)
+            self._decode_bio_slots(slot_logits, segmented_words, raw_transcript=raw_transcript)
             if slot_logits is not None
             else {}
         )

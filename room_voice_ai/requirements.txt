@@ -12,13 +12,15 @@ asyncio-throttle>=1.0.2
 websockets>=12.0
 
 # ── ONNX Runtime (CPU Execution – AVX2) ─────────────────────
+onnx>=1.16.0
 onnxruntime>=1.17.0
 
 # ── PyTorch (CPU build) ──────────────────────────────────────
-# Required by: Silero VAD v5 (Module 1) + DeepFilterNet3 (Module 1) + ONNX export (Module 2)
+# Required by: Silero VAD v5 (Module 1) + DeepFilterNet3 (Module 1) + ONNX export (Module 2, 4)
 # torch>=2.6.0 required by transformers (CVE-2025-32434 security fix)
 # Install CPU build: pip install "torch>=2.6.0" --index-url https://download.pytorch.org/whl/cpu
 torch>=2.6.0
+torchaudio>=2.6.0
 
 # ── Module 1: Audio Preprocessing & Signal Enhancement (CPU) ─
 sounddevice>=0.4.6
@@ -32,28 +34,29 @@ deepfilternet>=0.5.6
 openwakeword>=0.6.0
 
 # ── Module 3: Real-time Vietnamese Streaming ASR (GPU) ───────
-# faster-whisper: PhoWhisper-small via CTranslate2 float16 (~900MB VRAM)
+# faster-whisper: PhoWhisper-small via CTranslate2 int8_float16 (~950MB VRAM)
 faster-whisper>=1.0.3
 # ctranslate2: Quantization engine (float16/int8_float16 GPU CUDA Tensor Cores)
 ctranslate2>=4.0.0
-# huggingface_hub: Download PhoWhisper-small model weights from HuggingFace
+# huggingface_hub: Download PhoWhisper-small & Kokoro/Qwen2.5 model weights from HuggingFace
 huggingface_hub>=0.23.0
 
 # ── Module 4: NLU & Intent Recognition (CPU, PhoBERT-Joint ONNX int8) ──
 # transformers: PhoBERT BPE Tokenizer (64k vocab, PhoBERT-base-v2)
+# Word segmentation handled natively by internal Maximum Matching VietnameseWordSegmenter
 transformers>=4.40.0
 sentencepiece>=0.2.0
-# pyvi: Vietnamese word segmentation (Tier 1 – Word Segmenter, Module 4)
-pyvi>=0.1.1
 
 # ── Module 5: Context Manager (CPU, Standard Library) ────────
-# (No additional packages – pure Python stdlib)
+# (No additional packages – pure Python stdlib SQLite WAL + FTS5)
 
 # ── Module 6: Brain & RAG (GPU, Qwen2.5-3B GGUF int4) ───────
+# llama-cpp-python: GGUF Q4_K_M CUDA inference + LlamaGrammar GBNF Constrained Decoding
+llama-cpp-python>=0.3.0
 accelerate>=0.30.0
-# sentence-transformers: BGE-M3 Dense Embedding for Hybrid RAG
+# sentence-transformers: BGE-M3 Dense Embedding for Hybrid RAG (CPU-pinned)
 sentence-transformers>=3.0.0
-# faiss-cpu: HNSW In-Memory Vector Store for Dense Retrieval
+# faiss-cpu: HNSW Persistent & In-Memory Vector Store for Dense Retrieval
 faiss-cpu>=1.8.0
 # rank-bm25: Okapi BM25 Sparse Retrieval
 rank-bm25>=0.2.2

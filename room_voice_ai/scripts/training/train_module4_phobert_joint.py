@@ -214,7 +214,6 @@ def fill_template(template: str, slot_types: list[str]) -> tuple[str, dict[str, 
 def text_to_bio_labels(
     text: str,
     slots: dict[str, str],
-    tokenizer,
 ) -> tuple[list[str], list[str]]:
     """
     Chuyển text + slot dict → tokens + BIO labels.
@@ -230,7 +229,8 @@ def text_to_bio_labels(
             if words[i:i + len(slot_words)] == slot_words:
                 labels[i] = f"B-{slot_type}"
                 for j in range(1, len(slot_words)):
-                    labels[i + j] = f"I-{slot_type}"
+                    if i + j < len(labels):
+                        labels[i + j] = f"I-{slot_type}"
                 break
 
     return words, labels
@@ -246,19 +246,7 @@ def generate_dataset(n_per_intent: int = 500) -> list[dict]:
         while count < n_per_intent:
             template, slot_types = random.choice(templates)
             text, slots = fill_template(template, slot_types)
-
-            words = text.lower().split()
-            bio_labels = ["O"] * len(words)
-
-            for slot_type, slot_value in slots.items():
-                slot_words = slot_value.lower().split()
-                for i in range(len(words) - len(slot_words) + 1):
-                    if words[i:i + len(slot_words)] == slot_words:
-                        bio_labels[i] = f"B-{slot_type}"
-                        for j in range(1, len(slot_words)):
-                            if i + j < len(bio_labels):
-                                bio_labels[i + j] = f"I-{slot_type}"
-                        break
+            words, bio_labels = text_to_bio_labels(text, slots)
 
             dataset.append({
                 "text": text,
@@ -297,7 +285,7 @@ def build_joint_model(num_intents: int = 6, num_slots: int = 11):
     class PhoBERTJointModel(nn.Module):
         """PhoBERT-base-v2 + Dual Task Heads cho Joint NLU."""
 
-        def __init__(self, model_name: str, num_intents: int, num_slots: int):
+        def __init__(self, model_name: str, num_intents: int = num_intents, num_slots: int = num_slots):
             super().__init__()
             # Shared encoder
             self.bert = AutoModel.from_pretrained(model_name)

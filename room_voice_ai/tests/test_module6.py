@@ -227,7 +227,7 @@ class TestModule6EventBusIntegration:
             slots={"PER": "Nam", "TASK": "sửa bug"},
         )
         ctx_action = ContextPayload(nlu_output=nlu_action)
-        needs_rag, tool_name, tool_args = brain.route_execution_path(ctx_action)
+        _needs_rag, tool_name, tool_args = brain.route_execution_path(ctx_action)
         assert tool_name == "create_jira_task"
         assert tool_args["assignee"] == "Nam"
 

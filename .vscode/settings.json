@@ -20,6 +20,12 @@
     "${workspaceFolder}/room_voice_ai",
     "${workspaceFolder}/room_voice_ai/src"
   ],
+  "ruff.interpreter": [
+    "C:/Users/wanbi/AppData/Local/Programs/Python/Python312/python.exe"
+  ],
+  "ruff.path": [
+    "C:/Users/wanbi/AppData/Local/Programs/Python/Python312/Scripts/ruff.exe"
+  ],
   "python.testing.pytestArgs": [
     "room_voice_ai/tests"
   ],

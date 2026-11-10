@@ -78,7 +78,7 @@ def test_local_agreement_committing(asr_engine):
     asr_engine.unconfirmed_text = "Tôi muốn deploy"
 
     # chunk tiếp theo giải mã khớp 2 từ đầu, thay thế từ sau
-    stable, hyp = asr_engine.transcribe_streaming_chunk(chunk1, is_speech_final=False)
+    stable, _hyp = asr_engine.transcribe_streaming_chunk(chunk1, is_speech_final=False)
 
     # Tiền tố chung "Tôi muốn" phải được commit
     assert "Tôi muốn" in stable
@@ -107,7 +107,7 @@ def test_end_to_end_streaming_kpi(asr_engine):
     dummy_chunk = np.random.uniform(-0.05, 0.05, 8000).astype(np.float32)  # 0.5s audio
 
     start_time = time.perf_counter()
-    committed, hyp = asr_engine.transcribe_streaming_chunk(dummy_chunk, is_speech_final=False)
+    _committed, _hyp = asr_engine.transcribe_streaming_chunk(dummy_chunk, is_speech_final=False)
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
     print(f"\n[ASR KPI] Thời gian xử lý chunk 500ms: {elapsed_ms:.2f} ms")

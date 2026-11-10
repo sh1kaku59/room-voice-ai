@@ -621,7 +621,7 @@ class Module6AIBrainRAG:
                 logger.warning(f"[Module 6] Streaming fallback: {e}")
 
         # 2. Fast High-Precision Reasoning Engine (Môi trường Test / Fallback thông minh)
-        response_template = self._synthesize_smart_response(prompt, tool_name, tool_args, retrieved_docs)
+        response_template = self._synthesize_smart_response(tool_name, tool_args, retrieved_docs)
         words = response_template.split(" ")
         for i, word in enumerate(words):
             yield word + (" " if i < len(words) - 1 else "")
@@ -629,7 +629,6 @@ class Module6AIBrainRAG:
 
     def _synthesize_smart_response(
         self,
-        prompt: str,
         tool_name: str | None,
         tool_args: dict[str, Any] | None,
         retrieved_docs: list[dict[str, Any]] | None,
@@ -723,10 +722,6 @@ class Module6AIBrainRAG:
         )
         await self.bus.publish(EventChannel.BRAIN_RESPONSE, final_payload)
         logger.info(f"[Module 6] Phản hồi hoàn tất ({len(full_text)} ký tự). Phát tới Module 7.")
-
-    def _build_prompt(self, ctx: ContextPayload) -> str:
-        """Alias tương thích cho các unit test cũ."""
-        return self.assemble_complete_prompt(ctx, ctx.retrieved_docs or [])
 
 
 # ---------------------------------------------------------------------------

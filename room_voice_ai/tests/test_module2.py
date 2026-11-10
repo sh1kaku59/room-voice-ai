@@ -123,7 +123,7 @@ class TestWakeWordDetector:
         # Frame 50 -> 1.0, các frame khác -> 0.05
         frame_idx = 0
 
-        def mock_inference(feature_tensor: Any, audio_array: Any) -> float:
+        def mock_inference(_feature_tensor: Any, _audio_array: Any) -> float:
             nonlocal frame_idx
             prob = 1.0 if frame_idx == 50 else 0.05
             frame_idx += 1
