@@ -12,10 +12,12 @@ Chiến lược Hybrid RAG 3 tầng:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -173,8 +175,6 @@ class DenseSparseHybridRAG:
         if local_bge_dir.exists() and (local_bge_dir / "config.json").exists():
             return str(local_bge_dir)
 
-        from pathlib import Path
-
         hf_repo_dir = Path.home() / ".cache" / "huggingface" / "hub" / "models--BAAI--bge-m3" / "snapshots"
         if hf_repo_dir.exists():
             for snap in hf_repo_dir.iterdir():
@@ -248,12 +248,44 @@ class DenseSparseHybridRAG:
 
             faiss: Any = importlib.import_module("faiss")
 
-            index_path = f"{settings.RAG_VECTOR_DB_PATH}/index.faiss"
-            if os.path.exists(index_path):
-                self._faiss_index = faiss.read_index(index_path)
-                logger.info(f"[Module6/RAG] Loaded FAISS index from disk ({self._faiss_index.ntotal} docs).")
-        except Exception:
-            pass
+            store_dir = Path(settings.RAG_VECTOR_DB_PATH)
+            index_file = store_dir / "index.faiss"
+            docs_file = store_dir / "documents.json"
+            if index_file.exists() and index_file.stat().st_size > 0:
+                if docs_file.exists():
+                    saved_docs = json.loads(docs_file.read_text(encoding="utf-8"))
+                    saved_texts = [f"{d.get('title', '')} {d.get('content', '')}".strip() for d in saved_docs]
+                    curr_texts = [f"{d.get('title', '')} {d.get('content', '')}".strip() for d in self._documents]
+                    if self._documents and saved_texts != curr_texts:
+                        return
+                raw_bytes = np.frombuffer(index_file.read_bytes(), dtype=np.uint8)
+                loaded_index = faiss.deserialize_index(raw_bytes)
+                if not self._documents or loaded_index.ntotal == len(self._documents):
+                    self._faiss_index = loaded_index
+                    logger.info(
+                        f"[Module6/RAG] Loaded persistent FAISS index from disk '{index_file}' "
+                        f"({self._faiss_index.ntotal} docs, dim={self._faiss_index.d}) into RAM."
+                    )
+        except Exception as e:
+            logger.debug(f"[Module6/RAG] Could not load persisted FAISS index: {e}")
+
+    def _persist_faiss_store(self, faiss_mod: Any, index: Any, docs: list[dict[str, Any]]) -> None:
+        """Lưu bền vững chỉ mục vector index.faiss và metadata documents.json xuống ổ cứng."""
+        try:
+            store_dir = Path(settings.RAG_VECTOR_DB_PATH)
+            store_dir.mkdir(parents=True, exist_ok=True)
+            index_file = store_dir / "index.faiss"
+            docs_file = store_dir / "documents.json"
+
+            serialized = faiss_mod.serialize_index(index)
+            index_file.write_bytes(serialized.tobytes())
+            docs_file.write_text(json.dumps(docs, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info(
+                f"[Module6/RAG] Persisted FAISS vector store to '{index_file}' "
+                f"({index_file.stat().st_size} bytes, {len(docs)} docs)."
+            )
+        except Exception as e:
+            logger.warning(f"[Module6/RAG] Could not persist FAISS index to disk: {e}")
 
     # ------------------------------------------------------------------
     # Indexing Documents
@@ -291,6 +323,7 @@ class DenseSparseHybridRAG:
                 index = faiss.IndexFlatIP(dim)
                 index.add(embeddings)
                 self._faiss_index = index
+                self._persist_faiss_store(faiss, index, self._documents)
                 logger.info(f"[Module6/RAG] FAISS Dense Index built ({len(texts)} docs, dim={dim}).")
             except Exception as e:
                 logger.warning(f"[Module6/RAG] FAISS build fallback: {e}")
