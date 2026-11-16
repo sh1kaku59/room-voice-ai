@@ -104,6 +104,9 @@ class Module1AudioPreprocessor:
         self._df_model: Any = None   # DeepFilterNet3 model object
         self._df_state: Any = None   # DeepFilterNet3 stateful context
         self._vad_model: Any = None  # Silero VAD v5 model
+        self._webrtc_apm: Any = None # Tùy chọn WebRTC APM (webrtc_noise_gain.AudioProcessor)
+        self._aec_alpha: float = 0.0 # Hệ số NLMS thích nghi cho khử vọng loa ngoài
+        self._apm_pcm_buffer: bytearray = bytearray()
 
         # ── HPF IIR Butterworth bậc 2 coefficients (80 Hz @ 16 kHz) ────────
         self._hpf_b, self._hpf_a = self._design_hpf(HPF_CUTOFF_HZ, sample_rate)
@@ -137,18 +140,31 @@ class Module1AudioPreprocessor:
     def load(self) -> None:
         """
         Nạp tất cả model vào bộ nhớ CPU (gọi một lần khi khởi động).
-        Thứ tự: DeepFilterNet3 → Silero VAD v5.
+        Thứ tự: WebRTC APM → DeepFilterNet3 → Silero VAD v5.
         """
         logger.info("[Module1] Loading models...")
+        self._load_webrtc_apm()
         self._load_deepfilternet3()
         self._load_silero_vad()
         self.reset_hpf_state()
         logger.info("[Module1] ✅ All models loaded. Ready for streaming.")
 
+    def _load_webrtc_apm(self) -> None:
+        """Khởi tạo tùy chọn WebRTC APM (webrtc_noise_gain.AudioProcessor) nếu khả dụng."""
+        try:
+            from webrtc_noise_gain import AudioProcessor  # type: ignore
+            self._webrtc_apm = AudioProcessor(auto_gain=0, noise_suppression=1)
+            logger.info("[Module1/T1] WebRTC AudioProcessor ready (NS level=1).")
+        except Exception as exc:  # pylint: disable=broad-except
+            self._webrtc_apm = None
+            logger.debug("[Module1/T1] webrtc_noise_gain unavailable, using pure NumPy/SciPy Tier-1: %s", exc)
+
     def reset_hpf_state(self) -> None:
         """Đặt lại trạng thái delay IIR của HPF về 0."""
         order = max(len(self._hpf_b), len(self._hpf_a)) - 1
         self._hpf_zi = np.zeros((order,), dtype=np.float64)
+        self._aec_alpha = 0.0
+        self._apm_pcm_buffer.clear()
 
     def _load_deepfilternet3(self) -> None:
         """Tải DeepFilterNet3 qua thư viện `df` (DeepFilterNet Python package)."""
@@ -236,18 +252,60 @@ class Module1AudioPreprocessor:
     # ─────────────────────────────────────────────────────────────────────────
     # TẦNG 1: WebRTC APM (AEC3 + HPF + AGC)
     # ─────────────────────────────────────────────────────────────────────────
+    def _adaptive_aec_nlms(self, mic: np.ndarray, ref: np.ndarray) -> np.ndarray:
+        """
+        Khử vọng loa ngoài bằng ước lượng hệ số NLMS chuẩn hóa theo năng lượng ref.
+        Tự động thích nghi với biên độ loa ngoài trong khoảng [0.0, 1.5].
+        """
+        ref_energy = float(np.dot(ref, ref))
+        if ref_energy < 1e-8:
+            return mic.copy()
+        inst_alpha = float(np.dot(mic, ref)) / (ref_energy + 1e-8)
+        inst_alpha = float(np.clip(inst_alpha, 0.0, 1.5))
+        if self._aec_alpha == 0.0:
+            self._aec_alpha = inst_alpha
+        else:
+            self._aec_alpha = 0.35 * self._aec_alpha + 0.65 * inst_alpha
+        return mic - self._aec_alpha * ref
+
+    def apply_webrtc_apm(self, x: np.ndarray) -> np.ndarray:
+        """
+        Wrapper xử lý khung 10ms (160 mẫu = 320 bytes @ 16kHz) qua WebRTC AudioProcessor.
+        Trả về đúng độ dài đầu vào khi đủ khung 10ms; phần dư được giữ trong buffer liên tục.
+        """
+        if self._webrtc_apm is None or len(x) == 0:
+            return x.astype(np.float32)
+        try:
+            pcm_bytes = (np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
+            self._apm_pcm_buffer.extend(pcm_bytes)
+            out_chunks: list[bytes] = []
+            step_bytes = 320  # 10ms mono int16 @ 16kHz = 160 * 2 bytes
+            while len(self._apm_pcm_buffer) >= step_bytes:
+                chunk_10ms = bytes(self._apm_pcm_buffer[:step_bytes])
+                del self._apm_pcm_buffer[:step_bytes]
+                processed = self._webrtc_apm.Process10ms(chunk_10ms)
+                out_chunks.append(processed.audio)
+            if not out_chunks:
+                return x.astype(np.float32)
+            out_np = np.frombuffer(b"".join(out_chunks), dtype=np.int16).astype(np.float32) / 32768.0
+            if len(out_np) < len(x):
+                return np.concatenate([out_np, x[len(out_np):].astype(np.float32)])
+            return out_np[:len(x)].astype(np.float32)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug("[Module1/T1] WebRTC APM wrapper fallback: %s", exc)
+            return x.astype(np.float32)
+
     def aec_hpf_agc(
         self,
         mic: np.ndarray,
         ref: np.ndarray | None = None,
     ) -> np.ndarray:
         """
-        Tầng 1: Giả lập WebRTC APM.
+        Tầng 1: WebRTC APM + NLMS AEC + HPF + AGC.
 
-        Bước 1 – AEC3 (NLMS adaptive):
-          Mô hình hóa: mic_aec = mic - α × ref
-          α = 0.25 (hệ số suy hao echo tuyến tính, giả lập AEC3 thực)
-          Trong triển khai sản phẩm: gọi C++ wrapper webrtc_audio_processing.
+        Bước 1 – AEC3 (NLMS thích nghi):
+          Ước lượng suy hao echo NLMS khi có tín hiệu tham chiếu far-end `ref`,
+          giữ passthrough an toàn khi `ref is None`.
 
         Bước 2 – High-Pass Filter (Butterworth bậc 2, cutoff 80 Hz):
           Lọc bỏ thành phần hạ âm gây méo tín hiệu và rung micro.
@@ -255,9 +313,9 @@ class Module1AudioPreprocessor:
         Bước 3 – Adaptive AGC:
           Đo RMS và kéo về mục tiêu -18 dBFS để chuẩn hoá biên độ.
         """
-        # AEC3 – NLMS linear approximation
+        # AEC3 – NLMS adaptive estimation
         if ref is not None and ref.shape == mic.shape:
-            mic_aec = mic - 0.25 * ref
+            mic_aec = self._adaptive_aec_nlms(mic, ref)
         else:
             mic_aec = mic.copy()
 
@@ -266,6 +324,10 @@ class Module1AudioPreprocessor:
 
         # HPF IIR Butterworth bậc 2 (stateful, maintain delay zi)
         mic_hpf = self.apply_hpf(mic_aec)
+
+        # Áp dụng WebRTC APM bổ trợ khi đang chạy với ref thực và chiều dài khớp bội 10ms
+        if ref is not None and self._webrtc_apm is not None and len(mic_hpf) % 160 == 0:
+            mic_hpf = self.apply_webrtc_apm(mic_hpf)
 
         # Adaptive AGC → target = -18 dBFS
         mic_agc = self.apply_agc(mic_hpf, target_dbfs=AGC_TARGET_DBFS)
@@ -422,8 +484,12 @@ class Module1AudioPreprocessor:
             self.hangover_counter -= 1
             self.vad_is_open = True
 
+        elif self.vad_is_open and speech_prob >= VAD_THETA_END:
+            # Trong vùng hysteresis [θ_end=0.35, θ_start=0.50) khi cổng đang mở: giữ cổng mở
+            self.vad_is_open = True
+
         else:
-            # Hết bộ đếm: đóng cổng hoàn toàn
+            # P(Speech) < θ_end và hết bộ đếm: đóng cổng hoàn toàn
             self.vad_is_open = False
 
         return self.vad_is_open

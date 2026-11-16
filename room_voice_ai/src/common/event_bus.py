@@ -31,6 +31,7 @@ class EventChannel:  # pylint: disable=too-few-public-methods
     OUTPUT_READY     = "output.ready"         # Module7 → Audio/UI Client
     SYSTEM_ERROR     = "system.error"         # Bất kỳ module nào → Logger
     PIPELINE_RESET   = "pipeline.reset"       # Reset toàn bộ state machine
+    AUDIO_GATE_CONTROL = "pipeline.audio_gate"  # Khóa/mở cổng Wake-Word & ASR tránh vọng loa
 
 
 # ---------------------------------------------------------------------------

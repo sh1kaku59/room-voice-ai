@@ -180,6 +180,7 @@ class Module5MeetingContextManager:
         self.rolling_summaries: list[str] = []
         self.archival_decisions: list[dict[str, Any]] = []
         self.speaker_profiles: dict[str, dict[str, Any]] = {}
+        self._summarized_turn_keys: collections.deque[str] = collections.deque(maxlen=256)
 
         # 3. Metadata State
         self.current_topic: str = "General Technical Discussion"
@@ -201,6 +202,21 @@ class Module5MeetingContextManager:
     # ------------------------------------------------------------------
     # TẦNG 1: Rolling Transcript & Metadata Indexing
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_timestamp_epoch(iso_or_ts: str | float | None, explicit_ts: Any = None) -> float:
+        """Chuẩn hóa timestamp epoch (giây) cho công thức suy giảm mũ theo thời gian."""
+        if isinstance(explicit_ts, (int, float)) and explicit_ts > 0:
+            return float(explicit_ts)
+        if isinstance(iso_or_ts, (int, float)) and iso_or_ts > 0:
+            return float(iso_or_ts)
+        if isinstance(iso_or_ts, str) and iso_or_ts.strip():
+            try:
+                parsed = datetime.fromisoformat(iso_or_ts.strip().replace("Z", "+00:00"))
+                return parsed.timestamp()
+            except ValueError:
+                pass
+        return time.time()
+
     def update_context_state(
         self,
         nlu_payload: dict[str, Any] | NLUOutputPayload,
@@ -214,12 +230,14 @@ class Module5MeetingContextManager:
             raw_text = nlu_payload.raw_text
             intent = nlu_payload.intent
             slots = nlu_payload.slots or {}
-            timestamp = datetime.fromtimestamp(nlu_payload.timestamp, UTC).isoformat()
+            turn_ts = self._resolve_timestamp_epoch(nlu_payload.timestamp)
+            timestamp = datetime.fromtimestamp(turn_ts, UTC).isoformat()
         else:
             raw_text = nlu_payload.get("raw_text", "")
             intent = nlu_payload.get("intent", "Chitchat_Clarification")
             slots = nlu_payload.get("slots", {})
             timestamp = nlu_payload.get("timestamp", datetime.now(UTC).isoformat())
+            turn_ts = self._resolve_timestamp_epoch(timestamp, nlu_payload.get("timestamp_ts"))
 
         if not raw_text:
             return {"status": "SKIPPED_EMPTY"}
@@ -264,6 +282,7 @@ class Module5MeetingContextManager:
             intent=intent,
             slots=slots,
             timestamp_iso=timestamp,
+            timestamp=turn_ts,
             embedding=current_embedding,
         )
 
@@ -278,6 +297,7 @@ class Module5MeetingContextManager:
                 "intent": intent,
                 "slots": slots,
                 "timestamp": timestamp,
+                "timestamp_ts": turn_ts,
                 "embedding": current_embedding,
             }
             self.archival_decisions.append(archival_item)
@@ -321,21 +341,60 @@ class Module5MeetingContextManager:
     # ------------------------------------------------------------------
     def _trigger_memory_pressure_eviction(self) -> None:
         """
-        Xử lý cảnh báo Memory Pressure: Tóm tắt lượt thoại cũ nhất để giải phóng FIFO Queue.
-        Tạo đoạn tóm tắt tự hồi quy (Recursive Summarization) vào Rolling Summary Buffer.
+        Xử lý cảnh báo Memory Pressure (>= 70% capacity):
+        Dùng con trỏ theo dõi để tóm tắt lượt thoại cũ nhất chưa từng được tóm tắt
+        vào Rolling Summary Buffer (tránh lặp lại working_context[0] nhiều lần),
+        đồng thời giữ nguyên FIFO Working Context cho đến max_working_turns.
         """
         if not self.working_context:
             return
 
-        oldest_turn = self.working_context[0]
-        slot_desc = ", ".join(f"{k}={v}" for k, v in oldest_turn.slots.items()) if oldest_turn.slots else "Không có chi tiết cụ thể"
+        target_turn: ConversationTurn | None = None
+        for turn in self.working_context:
+            turn_key = f"{turn.timestamp_iso}|{turn.speaker_id}|{turn.content}"
+            if turn_key not in self._summarized_turn_keys:
+                target_turn = turn
+                self._summarized_turn_keys.append(turn_key)
+                break
+
+        if target_turn is None:
+            target_turn = self.working_context[0]
+
+        slot_desc = ", ".join(f"{k}={v}" for k, v in target_turn.slots.items()) if target_turn.slots else "Không có chi tiết cụ thể"
         summary_snippet = (
-            f"Diễn biến lúc {oldest_turn.timestamp_iso} | {oldest_turn.speaker_id} ({oldest_turn.role}): "
-            f"thực hiện [{oldest_turn.intent}] nội dung '{oldest_turn.content}' (Chi tiết: {slot_desc})"
+            f"Diễn biến lúc {target_turn.timestamp_iso} | {target_turn.speaker_id} ({target_turn.role}): "
+            f"thực hiện [{target_turn.intent}] nội dung '{target_turn.content}' (Chi tiết: {slot_desc})"
         )
         self.rolling_summaries.append(summary_snippet)
         logger.info(
-            "🧹 [Module 5] Memory Pressure Alert (>=70%)! Evicted oldest turn to Rolling Summary."
+            "🧹 [Module 5] Memory Pressure Alert (>=70%)! Summarized oldest un-archived turn to Rolling Summary."
+        )
+
+    def _assemble_prompt_blocks(
+        self,
+        speakers_list: list[str],
+        rolling_items: list[str],
+        archival_items: list[str],
+        history_items: list[str],
+        current_user_query: str,
+    ) -> str:
+        """Lắp ráp 4 khối Prompt chuẩn MemGPT bảo toàn SYSTEM DIRECTIVE và CURRENT USER QUERY."""
+        rolling_str = "\n".join(rolling_items) if rolling_items else "No mid-term summary recorded yet."
+        archival_str = "\n".join(archival_items) if archival_items else "No decisions logged yet."
+        history_str = "\n".join(history_items) if history_items else "Chưa có lịch sử đối thoại trước đó."
+
+        return (
+            f"=== SYSTEM DIRECTIVE: MEETING CONTEXT ===\n"
+            f"Current Topic: {self.current_topic}\n"
+            f"Active Speakers: {speakers_list}\n\n"
+            f"=== MID-TERM ROLLING SUMMARY ===\n"
+            f"{rolling_str}\n\n"
+            f"=== KEY DECISIONS & ACTION ITEMS (ARCHIVAL MEMORY) ===\n"
+            f"{archival_str}\n\n"
+            f"=== RECENT DIALOGUE HISTORY (WORKING MEMORY) ===\n"
+            f"{history_str}\n\n"
+            f"=== CURRENT USER QUERY ===\n"
+            f"{current_user_query}"
         )
 
     # ------------------------------------------------------------------
@@ -353,8 +412,8 @@ class Module5MeetingContextManager:
         query_vec = self.vectorizer.encode(current_user_query)
         current_timestamp = time.time()
 
-        # 1. Chấm điểm tương quan lai cho Archival Decisions
-        scored_archival: list[tuple[float, dict[str, Any], int]] = []
+        # 1. Chấm điểm tương quan lai & tỷ suất giá trị/chi phí token (Greedy Knapsack) cho Archival Decisions
+        scored_archival: list[tuple[float, float, dict[str, Any], int]] = []
         for d in self.archival_decisions:
             d_vec = d.get("embedding")
             sim = self.vectorizer.cosine_similarity(d_vec, query_vec) if d_vec is not None else 0.5
@@ -370,50 +429,72 @@ class Module5MeetingContextManager:
                 + settings.CONTEXT_HYBRID_DELTA * recency
             )
 
-            item_text = f"- [{d['intent']} lúc {d['timestamp']}]: {d['speaker']} - {d['text']} | Chi tiết: {d['slots']}"
+            item_text = f"- [{d['intent']}]: {d['slots'] if d['slots'] else d['text']}"
             item_tokens = self.estimate_token_count(item_text)
-            scored_archival.append((hybrid_score, d, item_tokens))
+            utility_density = hybrid_score / max(item_tokens, 1)
+            scored_archival.append((utility_density, hybrid_score, d, item_tokens))
 
-        scored_archival.sort(key=lambda x: x[0], reverse=True)
-        top_archival = scored_archival[:5]
+        # Xếp hạng theo mật độ giá trị S_hybrid / Len(T) (tie-break theo hybrid_score)
+        scored_archival.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
-        # 2. Format Lịch sử Working Context
-        working_turns_formatted = []
-        for turn in self.working_context:
-            working_turns_formatted.append(
-                f"[{turn.timestamp_iso}] {turn.speaker_id} ({turn.role}): {turn.content}"
-            )
-        history_str = "\n".join(working_turns_formatted)
-
-        # 3. Format Archival & Rolling Summaries
-        archival_str = "\n".join(
-            [f"- [{item[1]['intent']}]: {item[1]['slots'] if item[1]['slots'] else item[1]['text']}" for item in top_archival]
-        )
-        rolling_str = "\n".join(self.rolling_summaries[-3:])
-
-        # 4. Lắp ráp Dynamic Prompt 4 khối chuẩn hóa
+        # 2. Định dạng từng khối
         speakers_list = list(self.speaker_profiles.keys()) if self.speaker_profiles else ["Speaker_1"]
-        compiled_prompt = (
-            f"=== SYSTEM DIRECTIVE: MEETING CONTEXT ===\n"
-            f"Current Topic: {self.current_topic}\n"
-            f"Active Speakers: {speakers_list}\n\n"
-            f"=== MID-TERM ROLLING SUMMARY ===\n"
-            f"{rolling_str if rolling_str else 'No mid-term summary recorded yet.'}\n\n"
-            f"=== KEY DECISIONS & ACTION ITEMS (ARCHIVAL MEMORY) ===\n"
-            f"{archival_str if archival_str else 'No decisions logged yet.'}\n\n"
-            f"=== RECENT DIALOGUE HISTORY (WORKING MEMORY) ===\n"
-            f"{history_str if history_str else 'Chưa có lịch sử đối thoại trước đó.'}\n\n"
-            f"=== CURRENT USER QUERY ===\n"
-            f"{current_user_query}"
-        )
+        history_items = [
+            f"[{turn.timestamp_iso}] {turn.speaker_id} ({turn.role}): {turn.content}"
+            for turn in self.working_context
+        ]
+        rolling_items = list(self.rolling_summaries[-3:])
 
-        # 5. Định lượng Token và Tối ưu hóa Knapsack Tham lam (Greedy Knapsack Pruning)
+        # Tính trước ngân sách khung cố định (System Directive + Query + Tiêu đề khối)
+        skeleton_tokens = self.estimate_token_count(
+            self._assemble_prompt_blocks(speakers_list, [], [], [], current_user_query)
+        )
+        # Chọn Archival bằng Greedy Knapsack trong phần ngân sách tối đa ~30% B_max (tối đa 5 mục)
+        archival_budget = max(80, int(self.max_token_budget * 0.30))
+        archival_items: list[str] = []
+        archival_tokens_used = 0
+        for _density, _score, d, tok_len in scored_archival:
+            if len(archival_items) >= 5:
+                break
+            if archival_tokens_used + tok_len <= archival_budget or not archival_items:
+                archival_items.append(f"- [{d['intent']}]: {d['slots'] if d['slots'] else d['text']}")
+                archival_tokens_used += tok_len
+
+        # Nếu riêng history vượt phần ngân sách còn lại, lọc bớt lượt cũ nhất theo token ước tính
+        history_token_costs = [self.estimate_token_count(h) for h in history_items]
+        rolling_token_costs = [self.estimate_token_count(r) for r in rolling_items]
+        available_for_history = max(0, self.max_token_budget - skeleton_tokens - archival_tokens_used - sum(rolling_token_costs))
+        while len(history_items) > 1 and sum(history_token_costs) > available_for_history:
+            history_items.pop(0)
+            history_token_costs.pop(0)
+
+        compiled_prompt = self._assemble_prompt_blocks(
+            speakers_list, rolling_items, archival_items, history_items, current_user_query
+        )
         estimated_tokens = self.estimate_token_count(compiled_prompt)
-        if estimated_tokens > self.max_token_budget:
-            ratio = self.max_token_budget / max(estimated_tokens, 1)
-            keep_chars = int(len(compiled_prompt) * ratio * 0.95)
-            compiled_prompt = compiled_prompt[-keep_chars:]
+
+        # 3. Hậu kiểm Knapsack Pruning bảo toàn SYSTEM DIRECTIVE & CURRENT USER QUERY
+        while estimated_tokens > self.max_token_budget and (rolling_items or len(archival_items) > 0 or len(history_items) > 0):
+            if rolling_items:
+                rolling_items.pop(0)
+            elif archival_items:
+                archival_items.pop()
+            elif history_items:
+                history_items.pop(0)
+            compiled_prompt = self._assemble_prompt_blocks(
+                speakers_list, rolling_items, archival_items, history_items, current_user_query
+            )
             estimated_tokens = self.estimate_token_count(compiled_prompt)
+
+        # Fallback cuối nếu ngay cả 1 lượt query/lịch sử đơn lẻ vượt ngưỡng B_max
+        if estimated_tokens > self.max_token_budget:
+            safe_query = current_user_query
+            header_only = self._assemble_prompt_blocks(speakers_list, [], [], [], "")
+            if self.estimate_token_count(header_only) < self.max_token_budget:
+                char_budget = max(32, int(len(safe_query) * (self.max_token_budget / max(estimated_tokens, 1)) * 0.8))
+                safe_query = safe_query[:char_budget]
+                compiled_prompt = self._assemble_prompt_blocks(speakers_list, [], [], [], safe_query)
+                estimated_tokens = self.estimate_token_count(compiled_prompt)
             logger.warning(
                 f"[Module 5] Knapsack Token Budget Pruning applied: pruned to {estimated_tokens} tokens (B_max={self.max_token_budget})."
             )
@@ -579,6 +660,7 @@ class Module5MeetingContextManager:
         """Xóa Working Context và Rolling Memory khi có sự kiện Reset."""
         self.working_context.clear()
         self.rolling_summaries.clear()
+        self._summarized_turn_keys.clear()
         self._last_turn_embedding = None
         self._working_memory = self.SYSTEM_PROMPT
         logger.info("[Module 5] Context state reset cleanly.")

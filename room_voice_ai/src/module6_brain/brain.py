@@ -201,6 +201,12 @@ class ConstrainedJSONGrammar:
                     arguments["meeting_title"] = "Cuộc họp tiếp theo"
                 elif m == "start_time":
                     arguments["start_time"] = "09:00 ngày mai"
+                elif m == "recipients":
+                    arguments["recipients"] = ["team@meeting.local"]
+                elif m == "subject":
+                    arguments["subject"] = "Tóm tắt biên bản cuộc họp"
+                elif m == "body":
+                    arguments["body"] = "Nội dung tổng hợp từ trợ lý cuộc họp RooM."
 
         return {
             "valid": True,
@@ -430,19 +436,39 @@ class Module6AIBrainRAG:
             }
         elif intent == "Schedule_Followup":
             tool_name = "schedule_meeting"
+            participants = (
+                list(context_payload.speaker_profiles.keys())
+                if context_payload.speaker_profiles
+                else []
+            )
             tool_args = {
                 "meeting_title": slots.get("EVENT") or "Họp tiếp theo / Sprint Review",
                 "start_time": slots.get("Absolute_Deadline") or slots.get("TIME") or "09:00 ngày mai",
                 "duration_minutes": 45,
-                "topic": context_payload.working_memory or "Thảo luận tiến độ dự án",
+                "participants": participants,
             }
         elif intent == "Summarize_Meeting":
-            tool_name = "export_minutes"
-            tool_args = {
-                "meeting_topic": "Tổng kết diễn biến & quyết định cuộc họp",
-                "decisions": [d.get("text", "") for d in context_payload.archival_decisions[:5]],
-                "action_items": [f"{d.get('speaker', '')}: {d.get('slots', '')}" for d in context_payload.archival_decisions],
-            }
+            q_lower = query.lower()
+            if any(k in q_lower for k in ["gửi email", "gửi mail", "send email", "email biên bản", "mail tóm tắt"]):
+                tool_name = "send_summary_email"
+                tool_args = {
+                    "recipients": ["team@meeting.local"],
+                    "subject": f"Biên bản cuộc họp: {query[:60]}" if query else "Biên bản cuộc họp RooM",
+                    "body": "\n".join(
+                        [d.get("text", "") for d in context_payload.archival_decisions[:5]]
+                    )
+                    or context_payload.working_memory
+                    or "Tổng kết biên bản cuộc họp.",
+                }
+            else:
+                tool_name = "export_minutes"
+                tool_args = {
+                    "file_format": "markdown",
+                    "include_transcripts": True,
+                    "meeting_topic": "Tổng kết diễn biến & quyết định cuộc họp",
+                    "decisions": [d.get("text", "") for d in context_payload.archival_decisions[:5]],
+                    "action_items": [f"{d.get('speaker', '')}: {d.get('slots', '')}" for d in context_payload.archival_decisions],
+                }
 
         return needs_rag, tool_name, tool_args
 
@@ -496,6 +522,38 @@ class Module6AIBrainRAG:
         )
         return full_prompt
 
+    def _build_validated_action_payload(
+        self,
+        prompt: str,
+        response_text: str,
+        tool_name: str | None,
+        tool_args: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Trích xuất hoặc sinh JSON Tool Call qua LlamaGrammar và hậu kiểm Schema."""
+        if not tool_name:
+            return None
+
+        extracted_args = ConstrainedJSONGrammar.extract_json_from_text(response_text)
+        if (
+            extracted_args is None
+            and not self._is_mock_mode
+            and getattr(settings, "LLM_GRAMMAR_MASKING", True)
+        ):
+            json_prompt = (
+                f"{prompt}Hãy trả về DUY NHẤT đối tượng JSON hợp lệ cho công cụ '{tool_name}':\n"
+            )
+            extracted_args = self.generate_constrained_tool_call(json_prompt, tool_name)
+
+        merged_args = (
+            {**(tool_args or {}), **extracted_args}
+            if isinstance(extracted_args, dict)
+            else (tool_args or {})
+        )
+        validated = ConstrainedJSONGrammar.validate_and_format_tool_call(tool_name, merged_args)
+        if validated["valid"]:
+            return validated["tool_call"]
+        return None
+
     # ------------------------------------------------------------------
     # TẦNG 3: Reasoning & Function Calling Execution
     # ------------------------------------------------------------------
@@ -527,7 +585,8 @@ class Module6AIBrainRAG:
         retrieved_docs: list[dict[str, Any]] = []
         if needs_rag:
             query = ctx.nlu_output.raw_text if ctx.nlu_output else ""
-            top_k_docs = 2 if tool_name else settings.RAG_TOP_K
+            default_top_k = min(getattr(settings, "RAG_TOP_K", 3), 3)
+            top_k_docs = 2 if tool_name else default_top_k
             retrieved_docs = await self.rag.retrieve(query, top_k=top_k_docs)
             ctx.retrieved_docs = retrieved_docs
 
@@ -557,18 +616,10 @@ class Module6AIBrainRAG:
         )
         speed_tok_s = tokens_count / max(decode_window, 1e-3) if tokens_count > 0 else 32.0
 
-        # 5. Xử lý Function Call payload nếu có (kết hợp trích xuất JSON từ LLM và hậu kiểm Schema)
-        action_payload = None
-        if tool_name:
-            extracted_args = ConstrainedJSONGrammar.extract_json_from_text(response_text)
-            merged_args = (
-                {**(tool_args or {}), **extracted_args}
-                if isinstance(extracted_args, dict)
-                else (tool_args or {})
-            )
-            validated = ConstrainedJSONGrammar.validate_and_format_tool_call(tool_name, merged_args)
-            if validated["valid"]:
-                action_payload = validated["tool_call"]
+        # 5. Xử lý Function Call payload nếu có (tách kênh JSON Schema với LlamaGrammar)
+        action_payload = self._build_validated_action_payload(
+            prompt, response_text, tool_name, tool_args
+        )
 
         return {
             "status": "SUCCESS",
@@ -596,11 +647,9 @@ class Module6AIBrainRAG:
         # 1. Nếu có Llama model thật nạp trong bộ nhớ
         if not self._is_mock_mode and self._llm is not None:
             try:
-                # llama-cpp-python streaming
+                # llama-cpp-python streaming (giữ tiếng Việt tự nhiên cho Chat/TTS;
+                # Tool Call JSON Schema được cưỡng chế qua generate_constrained_tool_call)
                 if hasattr(self._llm, "create_completion"):
-                    if tool_name and getattr(settings, "LLM_GRAMMAR_MASKING", True):
-                        _ = ConstrainedJSONGrammar.get_llama_grammar(tool_name)
-
                     completion_kwargs: dict[str, Any] = {
                         "prompt": prompt,
                         "max_tokens": min(settings.LLM_MAX_NEW_TOKENS, 96),
@@ -652,6 +701,8 @@ class Module6AIBrainRAG:
                 "Biên bản cuộc họp đã được tổng hợp hoàn tất với đầy đủ danh sách các quyết định kỹ thuật "
                 "và các Action Items đã chốt."
             )
+        elif tool_name == "send_summary_email":
+            return "Tôi đã chuẩn bị nội dung biên bản tóm tắt và sẵn sàng gửi email cho các thành viên tham gia."
         elif retrieved_docs:
             top_doc = retrieved_docs[0]
             return (
@@ -676,7 +727,8 @@ class Module6AIBrainRAG:
         retrieved_docs: list[dict[str, Any]] = []
         if needs_rag:
             query = ctx.nlu_output.raw_text if ctx.nlu_output else ""
-            retrieved_docs = await self.rag.retrieve(query, top_k=settings.RAG_TOP_K)
+            top_k_docs = min(getattr(settings, "RAG_TOP_K", 3), 3)
+            retrieved_docs = await self.rag.retrieve(query, top_k=top_k_docs)
             ctx.retrieved_docs = retrieved_docs
 
         prompt = self.assemble_complete_prompt(ctx, retrieved_docs, tool_name)
@@ -697,16 +749,9 @@ class Module6AIBrainRAG:
 
         # 3. Phát Payload hoàn chỉnh cuối cùng (is_streaming=False)
         action_json = ""
-        if tool_name:
-            extracted_args = ConstrainedJSONGrammar.extract_json_from_text(full_text)
-            merged_args = (
-                {**(tool_args or {}), **extracted_args}
-                if isinstance(extracted_args, dict)
-                else (tool_args or {})
-            )
-            validated = ConstrainedJSONGrammar.validate_and_format_tool_call(tool_name, merged_args)
-            if validated["valid"]:
-                action_json = json.dumps(validated["tool_call"], ensure_ascii=False)
+        action_call = self._build_validated_action_payload(prompt, full_text, tool_name, tool_args)
+        if action_call is not None:
+            action_json = json.dumps(action_call, ensure_ascii=False)
 
         final_payload = BrainResponsePayload(
             session_id=self.session_id,

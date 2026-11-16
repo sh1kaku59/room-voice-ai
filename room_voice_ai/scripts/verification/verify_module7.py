@@ -62,10 +62,10 @@ async def run_verification():
     normalized = gen._normalize_vietnamese_text(sample_text)
     print(f"  Văn bản thô     : '{sample_text}'")
     print(f"  Văn bản chuẩn hóa: '{normalized}'")
-    assert "100 phần trăm" in normalized
+    assert "một trăm phần trăm" in normalized
     assert "A P I" in normalized
     assert "G R P C" in normalized
-    assert "17 giờ" in normalized
+    assert "mười bảy giờ" in normalized
     assert "Di ra" in normalized
     print("  OK    Text Normalization & G2P Verified 100%")
 

@@ -59,18 +59,18 @@ class TestModule7SpecificationKPIs:
     def test_text_normalization(self):
         """
         Test Case 2: test_text_normalization
-        Kiểm tra chuyển đổi số, phần trăm và từ viết tắt IT:
-        'API' -> 'A P I', '100%' -> '100 phần trăm', '17h00' -> '17 giờ', 'gRPC' -> 'G R P C'.
+        Kiểm tra chuyển đổi số, phần trăm và từ viết tắt IT theo Doc/module7_specification.md §10:
+        'API' -> 'A P I', '100%' -> 'một trăm phần trăm', '17h00' -> 'mười bảy giờ', 'gRPC' -> 'G R P C'.
         """
         gen = Module7MultimodalOutputGenerator()
 
         raw_sample = "Hoàn thành 100% tài liệu API và gRPC trước 17h00 trên Jira."
         normalized = gen._normalize_vietnamese_text(raw_sample)
 
-        assert "100 phần trăm" in normalized
+        assert "một trăm phần trăm" in normalized
         assert "A P I" in normalized
         assert "G R P C" in normalized
-        assert "17 giờ" in normalized
+        assert "mười bảy giờ" in normalized
         assert "Di ra" in normalized
 
         # Kiểm tra loại bỏ markdown thừa

@@ -92,10 +92,12 @@ class Module3VietnameseStreamingASR:
         }
 
         # Đăng ký lắng nghe EventBus
+        self._gate_locked = False
         self.bus = EventBus.get_instance()
         self.bus.subscribe(EventChannel.AUDIO_CHUNK, self._on_audio_chunk)
         self.bus.subscribe(EventChannel.WAKE_WORD, self._on_wake_word)
         self.bus.subscribe(EventChannel.PIPELINE_RESET, self._on_reset)
+        self.bus.subscribe(EventChannel.AUDIO_GATE_CONTROL, self._on_audio_gate_control)
         logger.info(f"[Module 3] Initialized (device={device}, compute_type={compute_type}).")
 
     def _init_model_engine(self, model_path: str) -> None:
@@ -264,12 +266,29 @@ class Module3VietnameseStreamingASR:
         self.unconfirmed_text = ""
 
     async def _on_wake_word(self, _payload: WakeWordPayload | None = None) -> None:
-        """Bật chế độ lắng nghe khi phát hiện wake-word."""
+        """Bật chế độ lắng nghe khi phát hiện wake-word (chống reset trùng lặp)."""
+        if self._listening or self._gate_locked:
+            logger.debug("[Module 3] Đang lắng nghe hoặc cổng đang khóa, bỏ qua wake-word trùng.")
+            return
         self.start_listening()
         logger.info("[Module 3] 👂 Listening started.")
 
+    async def _on_audio_gate_control(self, payload: Any) -> None:
+        """Đồng bộ khóa/mở ASR theo trạng thái Pipeline để không thu lại âm thanh loa."""
+        if not isinstance(payload, dict):
+            return
+        asr_enabled = payload.get("asr_enabled")
+        if asr_enabled is False:
+            self._gate_locked = True
+            self._listening = False
+            self._has_spoken_in_turn = False
+            self._silence_frames_after_speech = 0
+        elif asr_enabled is True:
+            self._gate_locked = False
+
     async def _on_reset(self, _payload: object | None = None) -> None:
         """Reset trạng thái về idle."""
+        self._gate_locked = False
         self._listening = False
         self._has_spoken_in_turn = False
         self._silence_frames_after_speech = 0

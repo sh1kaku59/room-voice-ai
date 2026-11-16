@@ -220,9 +220,12 @@ class Module2WakeWordDetector:
         # ── 5. Refractory Debounce Cooldown Manager ─────────────────────────
         self.cooldown_frames_limit = int(cooldown_seconds / (frame_size / sample_rate))
         self.cooldown_counter = 0
+        self._gate_enabled: bool = True
 
-        # Đăng ký nhận AudioChunkPayload từ EventBus
+        # Đăng ký nhận AudioChunkPayload và sự kiện khóa/mở cổng từ EventBus
         self.bus.subscribe(EventChannel.AUDIO_CHUNK, self._on_audio_chunk)
+        self.bus.subscribe(EventChannel.AUDIO_GATE_CONTROL, self._on_audio_gate_control)
+        self.bus.subscribe(EventChannel.PIPELINE_RESET, self._on_pipeline_reset)
 
         logger.info(
             "[Module2] WakeWordDetector initialized. buffer=%dsamples/%.1fs, "
@@ -392,8 +395,33 @@ class Module2WakeWordDetector:
     # ─────────────────────────────────────────────────────────────────────────
     # EventBus Handler
     # ─────────────────────────────────────────────────────────────────────────
+    async def _on_audio_gate_control(self, payload: Any) -> None:
+        """Khóa hoặc mở nhận diện Wake-Word theo vòng đời Pipeline nhằm chống vọng loa AI."""
+        enabled = True
+        reset_buffers = False
+        if isinstance(payload, dict):
+            enabled = bool(payload.get("wakeword_enabled", True))
+            reset_buffers = bool(payload.get("reset_buffers", False))
+
+        was_disabled = not self._gate_enabled
+        self._gate_enabled = enabled
+        if (was_disabled and enabled) or reset_buffers:
+            self.reset_audio_buffer()
+            self.reset_prob_history()
+            self.cooldown_counter = 0
+
+    async def _on_pipeline_reset(self, _payload: Any = None) -> None:
+        """Khôi phục trạng thái mặc định cho bộ phát hiện Wake-Word."""
+        self._gate_enabled = True
+        self.cooldown_counter = 0
+        self.reset_audio_buffer()
+        self.reset_prob_history()
+
     async def _on_audio_chunk(self, payload: AudioChunkPayload) -> None:
         """Lắng nghe và xử lý AudioChunkPayload từ Module 1 trên EventChannel.AUDIO_CHUNK."""
+        if not self._gate_enabled:
+            return
+
         if not payload.is_speech or not payload.audio_bytes:
             self.prob_history.append(0.0)
             return

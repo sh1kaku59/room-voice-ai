@@ -99,6 +99,13 @@ WEBSOCKET_HOST          = "0.0.0.0"
 WEBSOCKET_PORT          = 8765
 
 # ---------------------------------------------------------------------------
+# Pipeline Orchestrator & Playback Lock (Giai đoạn 1)
+# ---------------------------------------------------------------------------
+PIPELINE_LISTEN_TIMEOUT_SEC     = 10.0  # Timeout chờ người dùng nói sau wake-word
+PIPELINE_PROCESSING_TIMEOUT_SEC = 15.0  # Timeout chống treo khi đang xử lý NLU/RAG/LLM
+AUDIO_POST_TTS_COOLDOWN_MS      = 250   # Khoảng xả vang sau khi phát hết TTS audio (ms)
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 LOG_LEVEL               = "INFO"   # DEBUG | INFO | WARNING | ERROR

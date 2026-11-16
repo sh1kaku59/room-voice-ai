@@ -26,9 +26,7 @@
   "ruff.path": [
     "C:/Users/wanbi/AppData/Local/Programs/Python/Python312/Scripts/ruff.exe"
   ],
-  "python.testing.pytestArgs": [
-    "room_voice_ai/tests"
-  ],
+  "python.testing.pytestArgs": ["room_voice_ai/tests"],
   "python.testing.unittestEnabled": false,
   "python.testing.pytestEnabled": true
 }

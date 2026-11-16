@@ -25,6 +25,7 @@ Kiến trúc 3 tầng:
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import json
 import logging
@@ -83,6 +84,87 @@ _VI_CHAR_IPA: dict[str, str] = {
 }
 
 
+_VI_DIGITS = ("không", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín")
+_VI_SCALE_UNITS = ("", "nghìn", "triệu", "tỷ", "nghìn tỷ")
+
+
+def _read_triple_vi(triple: int, full_scale: bool) -> str:
+    """Đọc nhóm 3 chữ số (000..999) sang tiếng Việt chuẩn."""
+    hundreds = triple // 100
+    tens = (triple % 100) // 10
+    units = triple % 10
+    parts: list[str] = []
+
+    if hundreds > 0 or full_scale:
+        parts.append(f"{_VI_DIGITS[hundreds]} trăm")
+        if tens == 0 and units > 0:
+            parts.append("linh")
+
+    if tens == 1:
+        parts.append("mười")
+        if units == 5:
+            parts.append("lăm")
+        elif units > 0:
+            parts.append(_VI_DIGITS[units])
+    elif tens >= 2:
+        parts.append(f"{_VI_DIGITS[tens]} mươi")
+        if units == 1:
+            parts.append("mốt")
+        elif units == 5:
+            parts.append("lăm")
+        elif units > 0:
+            parts.append(_VI_DIGITS[units])
+    elif units > 0:
+        parts.append(_VI_DIGITS[units])
+
+    return " ".join(parts)
+
+
+def _int_to_vietnamese_words(value: int) -> str:
+    """Chuyển đổi số nguyên sang chữ tiếng Việt để Neural TTS phát âm chuẩn."""
+    if value == 0:
+        return "không"
+    if value < 0:
+        return f"âm {_int_to_vietnamese_words(-value)}"
+
+    groups: list[int] = []
+    n = value
+    while n > 0:
+        groups.append(n % 1000)
+        n //= 1000
+
+    chunks: list[str] = []
+    top_idx = len(groups) - 1
+    for idx in range(top_idx, -1, -1):
+        grp = groups[idx]
+        if grp == 0:
+            continue
+        full_scale = idx < top_idx
+        text = _read_triple_vi(grp, full_scale=full_scale)
+        unit = _VI_SCALE_UNITS[idx] if idx < len(_VI_SCALE_UNITS) else ""
+        chunks.append(f"{text} {unit}".strip() if unit else text)
+
+    return " ".join(chunks)
+
+
+def _number_to_vietnamese_words(num_str: str) -> str:
+    """Chuyển chuỗi số nguyên hoặc số thập phân (.,) sang chữ tiếng Việt."""
+    clean = num_str.strip()
+    if "," in clean or "." in clean:
+        sep = "," if "," in clean else "."
+        int_part, frac_part = clean.split(sep, 1)
+        int_words = _int_to_vietnamese_words(int(int_part)) if int_part.isdigit() else int_part
+        frac_clean = frac_part.lstrip("0")
+        if frac_part.startswith("0") and len(frac_part) > 1:
+            frac_words = " ".join(_VI_DIGITS[int(ch)] for ch in frac_part if ch.isdigit())
+        else:
+            frac_words = _int_to_vietnamese_words(int(frac_clean)) if frac_clean else "không"
+        return f"{int_words} phẩy {frac_words}"
+    if clean.isdigit():
+        return _int_to_vietnamese_words(int(clean))
+    return clean
+
+
 class Module7MultimodalOutputGenerator:
     """
     Module 7: Sinh phản hồi đa phương thức Text & Voice thời gian thực.
@@ -108,6 +190,9 @@ class Module7MultimodalOutputGenerator:
 
         # 2. Pattern tách vế câu theo dấu câu (Punctuation Splitter)
         self.clause_pattern = re.compile(r"([^,.:;?!]+[,.:;?!]*)")
+        self._stream_sentence_buffers: dict[str, str] = {}
+        self._stream_audio_accumulators: dict[str, bytearray] = {}
+        self._stream_spoken_flags: dict[str, bool] = {}
 
         # 3. Khởi tạo Neural TTS Engine Session & Phoneme Map
         self.tts_session: Any | None = None
@@ -203,15 +288,19 @@ class Module7MultimodalOutputGenerator:
     # ------------------------------------------------------------------
     def _normalize_vietnamese_text(self, text: str) -> str:
         """
-        Chuẩn hóa số liệu, tỷ lệ phần trăm, thời gian và thuật ngữ IT trước khi đưa vào TTS.
-        Ví dụ: '17h00' -> '17 giờ', 'API' -> 'A P I', '100%' -> '100 phần trăm'.
+        Chuẩn hóa số liệu thành chữ tiếng Việt, tỷ lệ phần trăm, thời gian và thuật ngữ IT trước khi vào G2P/TTS.
+        Ví dụ: '17h00' -> 'mười bảy giờ', 'API' -> 'A P I', '100%' -> 'một trăm phần trăm'.
         """
         if not text:
             return ""
 
-        text_clean = text
+        # 1. Loại bỏ Markdown thừa (cần chạy trước để tránh đọc các ký hiệu trong code block)
+        text_clean = re.sub(r"```[\s\S]*?```", "", text)
+        text_clean = re.sub(r"\*\*([^*]+)\*\*", r"\1", text_clean)
+        text_clean = re.sub(r"__([^_]+)__", r"\1", text_clean)
+        text_clean = re.sub(r"[#*_`]", "", text_clean)
 
-        # 1. Chuẩn hóa thuật ngữ IT & Acronyms
+        # 2. Chuẩn hóa thuật ngữ IT & Acronyms
         acronym_map = {
             "API": "A P I",
             "gRPC": "G R P C",
@@ -229,21 +318,41 @@ class Module7MultimodalOutputGenerator:
         for acronym, phoneme_text in acronym_map.items():
             text_clean = re.sub(rf"\b{acronym}\b", phoneme_text, text_clean)
 
-        # 2. Chuẩn hóa tỷ lệ phần trăm: 100% -> 100 phần trăm
-        text_clean = re.sub(r"(\d+)%", r"\1 phần trăm", text_clean)
+        # 3. Chuẩn hóa tỷ lệ phần trăm: 100% -> một trăm phần trăm
+        text_clean = re.sub(
+            r"(\d+(?:[.,]\d+)?)%",
+            lambda m: f"{_number_to_vietnamese_words(m.group(1))} phần trăm",
+            text_clean,
+        )
 
-        # 3. Chuẩn hóa thời gian: 17h00 -> 17 giờ, 17:00 -> 17 giờ
-        text_clean = re.sub(r"(\d{1,2})h00\b", r"\1 giờ", text_clean)
-        text_clean = re.sub(r"(\d{1,2}):00\b", r"\1 giờ", text_clean)
-        text_clean = re.sub(r"(\d{1,2})h(\d{1,2})\b", r"\1 giờ \2 phút", text_clean)
-        text_clean = re.sub(r"(\d{1,2}):(\d{1,2})\b", r"\1 giờ \2 phút", text_clean)
+        # 4. Chuẩn hóa thời gian: 17h00 -> mười bảy giờ, 17h30 -> mười bảy giờ ba mươi phút
+        text_clean = re.sub(
+            r"\b(\d{1,2})[h:]00\b",
+            lambda m: f"{_int_to_vietnamese_words(int(m.group(1)))} giờ",
+            text_clean,
+        )
+        text_clean = re.sub(
+            r"\b(\d{1,2})[h:](\d{1,2})\b",
+            lambda m: (
+                f"{_int_to_vietnamese_words(int(m.group(1)))} giờ "
+                f"{_int_to_vietnamese_words(int(m.group(2)))} phút"
+            ),
+            text_clean,
+        )
 
-        # 4. Loại bỏ các ký tự Markdown thừa trong audio đọc (**, ##, ```)
-        text_clean = re.sub(r"\*\*([^*]+)\*\*", r"\1", text_clean)
-        text_clean = re.sub(r"__([^_]+)__", r"\1", text_clean)
-        text_clean = re.sub(r"```[\s\S]*?```", "", text_clean)
-        text_clean = re.sub(r"[#*_`]", "", text_clean)
+        # 5. Chuyển số thập phân và số nguyên còn lại sang chữ tiếng Việt
+        text_clean = re.sub(
+            r"(?<![.\d])(\d+[.,]\d+)(?![.\d])",
+            lambda m: _number_to_vietnamese_words(m.group(1)),
+            text_clean,
+        )
+        text_clean = re.sub(
+            r"\b(\d+)\b",
+            lambda m: _int_to_vietnamese_words(int(m.group(1))),
+            text_clean,
+        )
 
+        text_clean = re.sub(r"\s+", " ", text_clean)
         return text_clean.strip()
 
     def split_clauses(self, text: str) -> list[str]:
@@ -515,11 +624,55 @@ class Module7MultimodalOutputGenerator:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    def _extract_ready_clauses(self, sess_key: str) -> list[str]:
+        """Tách các vế câu đã hoàn chỉnh dấu ngắt nhịp từ buffer stream theo session."""
+        buf = self._stream_sentence_buffers.get(sess_key, "")
+        if not buf:
+            return []
+
+        clauses = self.clause_pattern.findall(buf)
+        if not clauses:
+            return []
+
+        ready: list[str] = []
+        consumed = 0
+        for idx, clause in enumerate(clauses):
+            is_last = idx == len(clauses) - 1
+            stripped_r = clause.rstrip()
+            has_punct = stripped_r.endswith((",", ".", ":", ";", "?", "!"))
+            ends_decimal_dot = bool(re.search(r"\d\.$", stripped_r)) and is_last
+            if not is_last or (has_punct and not ends_decimal_dot):
+                consumed += len(clause)
+                if len(clause.strip()) >= 2 and re.search(r"\w", clause):
+                    ready.append(clause.strip())
+            else:
+                break
+
+        if consumed > 0:
+            self._stream_sentence_buffers[sess_key] = buf[consumed:]
+        return ready
+
+    def _synthesize_text_to_bytes(self, text: str) -> bytes:
+        """Chuẩn hóa + tách mệnh đề và tổng hợp âm thanh int16 PCM 24kHz."""
+        normalized = self._normalize_vietnamese_text(text)
+        if not normalized:
+            return b""
+        pcm_parts: list[np.ndarray] = []
+        for clause in self.split_clauses(normalized):
+            pcm = self._synthesize_clause_to_pcm(clause)
+            if len(pcm) > 0:
+                pcm_parts.append(pcm)
+        if not pcm_parts:
+            return b""
+        full_pcm = np.concatenate(pcm_parts)
+        return (full_pcm * 32767.0).astype(np.int16).tobytes()
+
     # ------------------------------------------------------------------
     # EventBus Pub/Sub Handler (Tích hợp chuỗi Pipeline)
     # ------------------------------------------------------------------
     async def _on_brain_response(self, payload: BrainResponsePayload) -> None:
-        """Tiếp nhận BrainResponsePayload từ Module 6 và phát sóng đa phương thức."""
+        """Tiếp nhận BrainResponsePayload từ Module 6 và phát sóng đa phương thức theo mệnh đề."""
+        sess_key = payload.session_id or self.session_id or "default"
         action_obj: dict[str, Any] | None = None
         if payload.action:
             try:
@@ -541,31 +694,53 @@ class Module7MultimodalOutputGenerator:
                 ensure_ascii=False,
             )
             await self._broadcast(msg)
-        else:
-            # 2. Phản hồi hoàn chỉnh: Định dạng Markdown và tổng hợp TTS
-            formatted_chat = self.format_chat_text(payload.text, action_payload=action_obj)
 
-            # Tổng hợp âm thanh toàn bài (Tự động chuyển đổi JSON Action sang câu thông báo giọng nói tự nhiên)
-            normalized_text = self._normalize_vietnamese_text(payload.text)
-            if (not normalized_text or normalized_text.startswith("{")) and isinstance(action_obj, dict):
+            # 2. Tổng hợp và phát TTS ngay khi hoàn thành từng vế câu dấu phẩy/chấm
+            self._stream_sentence_buffers[sess_key] = (
+                self._stream_sentence_buffers.get(sess_key, "") + payload.text
+            )
+            acc = self._stream_audio_accumulators.setdefault(sess_key, bytearray())
+            for ready_clause in self._extract_ready_clauses(sess_key):
+                clause_bytes = self._synthesize_text_to_bytes(ready_clause)
+                if clause_bytes:
+                    acc.extend(clause_bytes)
+                    self._stream_spoken_flags[sess_key] = True
+                    await self._stream_audio(clause_bytes, mark_final=False)
+        else:
+            # 3. Kết thúc luồng: xử lý phần văn bản dư chưa đọc và phát OutputPayload
+            formatted_chat = self.format_chat_text(payload.text, action_payload=action_obj)
+            rem_buf = self._stream_sentence_buffers.pop(sess_key, "")
+            acc = self._stream_audio_accumulators.pop(sess_key, bytearray())
+            already_spoken = self._stream_spoken_flags.pop(sess_key, False)
+
+            if already_spoken:
+                remaining_text = rem_buf.strip()
+            else:
+                remaining_text = payload.text
+
+            normalized_rem = self._normalize_vietnamese_text(remaining_text)
+            if (not normalized_rem or normalized_rem.startswith("{")) and not already_spoken and isinstance(action_obj, dict):
                 act_name: Any = action_obj.get("name", "")
                 raw_args: Any = action_obj.get("arguments")
                 act_args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
                 if act_name == "create_jira_task":
                     task = act_args.get("task_title", "công việc")
                     assignee = act_args.get("assignee", "thành viên")
-                    normalized_text = self._normalize_vietnamese_text(
-                        f"Đã ghi nhận nhiệm vụ {task} cho {assignee}."
-                    )
+                    remaining_text = f"Đã ghi nhận nhiệm vụ {task} cho {assignee}."
                 elif act_name == "schedule_meeting":
                     title = act_args.get("meeting_title", "cuộc họp")
-                    normalized_text = self._normalize_vietnamese_text(f"Đã đặt lịch {title}.")
-                elif not normalized_text:
-                    normalized_text = "Đã hoàn tất xử lý yêu cầu."
-            pcm_audio = self._synthesize_clause_to_pcm(normalized_text)
-            audio_bytes = (pcm_audio * 32767.0).astype(np.int16).tobytes() if len(pcm_audio) > 0 else b""
+                    remaining_text = f"Đã đặt lịch {title}."
+                elif act_name == "send_summary_email":
+                    remaining_text = "Đã chuẩn bị nội dung email tóm tắt biên bản cuộc họp."
+                elif not normalized_rem:
+                    remaining_text = "Đã hoàn tất xử lý yêu cầu."
 
-            # Gửi thông báo hoàn tất qua WebSocket
+            rem_bytes = self._synthesize_text_to_bytes(remaining_text) if remaining_text.strip() else b""
+            if rem_bytes:
+                acc.extend(rem_bytes)
+            total_audio_bytes = bytes(acc)
+
+            # Gửi thông báo hoàn tất text qua WebSocket
             done_msg = json.dumps(
                 {
                     "type": "text_stream",
@@ -583,28 +758,46 @@ class Module7MultimodalOutputGenerator:
             out_payload = OutputPayload(
                 session_id=self.session_id or payload.session_id,
                 text_response=payload.text,
-                audio_bytes=audio_bytes,
+                audio_bytes=total_audio_bytes,
                 tts_done=True,
                 display_markdown=formatted_chat,
             )
             await self.bus.publish(EventChannel.FINAL_OUTPUT, out_payload)
             await self.bus.publish(EventChannel.OUTPUT_READY, out_payload)
 
-            if audio_bytes:
-                await self._stream_audio(audio_bytes)
+            if rem_bytes:
+                await self._stream_audio(rem_bytes, mark_final=True)
+            elif already_spoken:
+                end_audio_msg = json.dumps(
+                    {
+                        "type": "audio_chunk",
+                        "encoding": "pcm_s16le_base64",
+                        "sample_rate": self.SAMPLE_RATE,
+                        "data_b64": "",
+                        "done": True,
+                    }
+                )
+                await self._broadcast(end_audio_msg)
+
+            if total_audio_bytes:
                 logger.info(
-                    f"[Module 7] Phát hoàn tất OutputPayload ({len(payload.text)} ký tự, {len(audio_bytes)} audio bytes)."
+                    f"[Module 7] Phát hoàn tất OutputPayload ({len(payload.text)} ký tự, {len(total_audio_bytes)} audio bytes)."
                 )
 
-    async def _stream_audio(self, audio_bytes: bytes, chunk_size: int = 4096) -> None:
-        """Gửi các mẩu audio nhỏ qua WebSocket."""
+    async def _stream_audio(
+        self, audio_bytes: bytes, chunk_size: int = 4096, mark_final: bool = True
+    ) -> None:
+        """Gửi các mẩu audio nhỏ mã hóa Base64 qua WebSocket."""
         for i in range(0, len(audio_bytes), chunk_size):
             chunk = audio_bytes[i : i + chunk_size]
+            is_last_chunk = i + chunk_size >= len(audio_bytes)
             msg = json.dumps(
                 {
                     "type": "audio_chunk",
-                    "data": list(chunk),
-                    "done": (i + chunk_size >= len(audio_bytes)),
+                    "encoding": "pcm_s16le_base64",
+                    "sample_rate": self.SAMPLE_RATE,
+                    "data_b64": base64.b64encode(chunk).decode("ascii"),
+                    "done": bool(mark_final and is_last_chunk),
                 }
             )
             await self._broadcast(msg)
