@@ -797,7 +797,7 @@ class Module7MultimodalOutputGenerator:
                     "encoding": "pcm_s16le_base64",
                     "sample_rate": self.SAMPLE_RATE,
                     "data_b64": base64.b64encode(chunk).decode("ascii"),
-                    "done": bool(mark_final and is_last_chunk),
+                    "done": mark_final and is_last_chunk,
                 }
             )
             await self._broadcast(msg)
